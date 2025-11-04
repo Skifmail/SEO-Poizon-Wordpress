@@ -90,8 +90,6 @@
 
 <img width="1393" height="979" alt="Снимок экрана 2025-11-04 113006" src="https://github.com/user-attachments/assets/c3a0c821-637e-42ab-bc21-b3b017fe1f90" />
 
-<img width="1393" height="979" alt="Снимок экрана 2025-11-04 113006" src="https://github.com/user-attachments/assets/01b7b657-9f70-4834-a91a-72095c4955cd" />
-
 <img width="1248" height="733" alt="Снимок экрана 2025-11-04 113422" src="https://github.com/user-attachments/assets/7cd04dcf-810d-4f65-b371-db2f41a4f823" />
 
 
