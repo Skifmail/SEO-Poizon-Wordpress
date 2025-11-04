@@ -1,34 +1,87 @@
-# Environment variables (содержит секретные API ключи!)
-.env
+# ============================================================================
+# .gitignore для проекта Poizon → WordPress
+# ============================================================================
 
-# Python cache
-__pycache__/
+# --- СЕКРЕТНЫЕ ДАННЫЕ (КРИТИЧНО!) ---
+.env                            # API ключи и секреты
+*.env                           # Все файлы окружения
+.env.*
+.env.local
+config.json                     # Конфигурация с секретами
+
+# --- Python ---
+__pycache__/                    # Скомпилированные Python файлы
 *.py[cod]
 *$py.class
-*.so
+*.so                            # C расширения
+.Python
+build/
+dist/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Virtual environment
-venv/
-env/
+# --- Виртуальное окружение ---
+venv/                           # Виртуальное окружение проекта
 ENV/
+env/
+.venv
 
-# IDE
-.vscode/
-.idea/
+# --- IDE и редакторы ---
+.vscode/                        # Visual Studio Code
+.idea/                          # PyCharm / IntelliJ IDEA
+.cursor/                        # Cursor IDE
+.gigaide/                       # GigaIDE
 *.iml
+*.swp
+*.swo
+*~
 
-# Logs
-*.log
+# --- Логи ---
+*.log                           # Все log файлы
 *.log.*
+web_app.log
+poizon_sync_service.log
+logs/
 
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
+# --- Тестирование ---
+.pytest_cache/                  # Pytest кэш
+.coverage
+htmlcov/
+.tox/
+.nox/
+*.cover
 
-# Temporary files
+# --- Временные файлы ---
 *.tmp
 *.temp
 *.bak
-*.swp
-*~
+*.cache
+
+# --- OS файлы ---
+.DS_Store                       # macOS
+Thumbs.db                       # Windows
+desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# --- База данных ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Медиа файлы (загруженные) ---
+uploads/
+media/
+images/
+
+# --- Резервные копии ---
+*.backup
+backup/
+old/
+
+# --- Прочее ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
