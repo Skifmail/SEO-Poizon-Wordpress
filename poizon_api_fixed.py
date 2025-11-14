@@ -72,7 +72,7 @@ class PoisonAPIClientFixed:
             'Content-Type': 'application/json'
         }
         
-        logger.info("[OK] Инициализирован Poizon API клиент (исправленный)")
+        # Убрано: логи инициализации (дублируются в режиме DEBUG)
     
     def get_brands(self, limit: int = 100, page: int = 0) -> List[Dict]:
         """
@@ -89,7 +89,7 @@ class PoisonAPIClientFixed:
             url = f"{self.base_url}/getBrands"
             data = {"limit": limit, "page": page}
             
-            logger.debug(f"Запрос брендов: limit={limit}, page={page}")
+            # Убрано DEBUG: запрос брендов
             response = requests.post(url, json=data, headers=self.headers, timeout=60)
             response.raise_for_status()
             
@@ -117,7 +117,7 @@ class PoisonAPIClientFixed:
             url = f"{self.base_url}/getCategories"
             params = {"lang": lang}
             
-            logger.debug(f"Запрос категорий: lang={lang}")
+            # Убрано DEBUG: запрос категорий
             response = requests.get(url, params=params, headers=self.headers, timeout=60)
             response.raise_for_status()
             
@@ -132,13 +132,13 @@ class PoisonAPIClientFixed:
             logger.error(f"[ERROR] Ошибка загрузки категорий: {e}")
             return []
     
-    def search_products(self, keyword: str, limit: int = 50, page: int = 0) -> List[Dict]:
+    def search_products(self, keyword: str, limit: int = 100, page: int = 0) -> List[Dict]:
         """
         Поиск товаров по ключевому слову.
         
         Args:
             keyword: Ключевое слово для поиска
-            limit: Максимальное количество товаров
+            limit: Максимальное количество товаров (по умолчанию 100 - проверенный максимум API)
             page: Номер страницы
             
         Returns:
@@ -148,11 +148,11 @@ class PoisonAPIClientFixed:
             url = f"{self.base_url}/searchProducts"
             params = {
                 "keyword": keyword,
-                "limit": min(limit, 100),
+                "limit": min(limit, 100),  # API Poizon максимум 100
                 "page": page
             }
             
-            logger.debug(f"Поиск товаров: keyword={keyword}, limit={limit}")
+            # Убрано DEBUG: поиск товаров
             response = requests.get(url, params=params, headers=self.headers, timeout=60)
             response.raise_for_status()
             
@@ -209,9 +209,18 @@ class PoisonAPIClientFixed:
             params = {"spuId": spu_id}
             
             response = requests.get(url, params=params, headers=self.headers, timeout=60)
+            
+            # Проверка статуса ответа
+            if response.status_code == 403:
+                logger.warning(f"⚠️ priceInfo SPU {spu_id}: 403 Forbidden - эндпоинт недоступен или требует дополнительную авторизацию")
+                return {}
+            
             response.raise_for_status()
             
             data = response.json()
+            # logger.debug(f"  [DEBUG] priceInfo response for SPU {spu_id}: {data}")  # Убрано: слишком много данных
+            
+            # API возвращает структуру {"skus": {...}}, а НЕ {"data": {"skus": {...}}}
             skus_dict = data.get('skus', {})
             
             # Парсим цены
@@ -226,7 +235,7 @@ class PoisonAPIClientFixed:
                     
                     if price:
                         result[str(sku_id)] = {
-                            'price': float(price),
+                            'price': float(price) / 100,  # Цена в API в фенях, делим на 100 для юаней
                             'stock': int(quantity)
                         }
             
@@ -268,32 +277,28 @@ class PoisonAPIClientFixed:
             
             # === ШАГ 2: Получаем актуальные цены и остатки через priceInfo ===
             prices = self.get_price_info(spu_id)
-            logger.info(f"  [DEBUG] Получено цен из priceInfo: {len(prices)}")
-            if prices:
-                first_three = list(prices.items())[:3]
-                logger.info(f"  [DEBUG] Первые 3 цены: {first_three}")
+            # Убрано избыточное логирование DEBUG
             
             # Парсим данные
-            logger.info(f"  [DEBUG] ======== КЛЮЧИ ВЕРХНЕГО УРОВНЯ detail_data ========")
-            logger.info(f"  [DEBUG] detail_data.keys(): {detail_data.keys()}")
-            logger.info(f"  [DEBUG] =================================================")
+            # Убрано избыточное логирование ключей detail_data
             
             detail = detail_data.get('detail', {})
             skus_array = detail_data.get('skus', [])
-            logger.info(f"  [DEBUG] Получено SKU из productDetailV3: {len(skus_array)}")
+            # Убрано: logger.debug(f"  [DEBUG] Получено SKU из productDetailV3: {len(skus_array)}")
             
             # Проверяем структуру image
             image_root = detail_data.get('image', {})
-            logger.info(f"  [DEBUG] image.keys(): {image_root.keys() if image_root else 'EMPTY'}")
+            # Убрано избыточное логирование image.keys()
             
             # Проверяем sortList - может там изображения по цветам?
             sort_list = image_root.get('sortList', [])
-            logger.info(f"  [DEBUG] sortList: {len(sort_list)} элементов")
-            if sort_list and len(sort_list) > 0:
-                logger.info(f"  [DEBUG] Первый элемент sortList: {sort_list[0]}")
+            # Убрано избыточное логирование sortList
             
             image_data = image_root.get('spuImage', {})
-            brand_data = detail_data.get('brand', {})
+            # Извлекаем бренд из brandRootInfo
+            brand_root_info = detail_data.get('brandRootInfo', {})
+            brand_list = brand_root_info.get('brandItemList', [])
+            brand_data = brand_list[0] if brand_list else {}
             sale_properties = detail_data.get('saleProperties', {}).get('list', [])
             
             # === ШАГ 3: Создаем маппинг размеров и цветов ===
@@ -315,23 +320,13 @@ class PoisonAPIClientFixed:
                 if '颜色' in prop_name and size_value and property_value_id:
                     color_value_map[property_value_id] = size_value
             
-            logger.info(f"  [DEBUG] size_value_map создан: {len(size_value_map)} размеров")
-            logger.info(f"  [DEBUG] color_value_map создан: {len(color_value_map)} цветов")
-            
-            if size_value_map:
-                first_three = dict(list(size_value_map.items())[:3])
-                logger.info(f"  [DEBUG] Первые 3 размера: {first_three}")
-            if color_value_map:
-                first_three_colors = dict(list(color_value_map.items())[:3])
-                logger.info(f"  [DEBUG] Первые 3 цвета: {first_three_colors}")
+            # Убрано избыточное DEBUG логирование size/color maps
             
             # ТЕПЕРЬ извлекаем изображения
             images = []
             images_list = image_data.get('images', [])
             
-            # DEBUG: логируем структуру изображений
-            logger.info(f"  [DEBUG] image_data.keys(): {image_data.keys() if image_data else 'EMPTY'}")
-            logger.info(f"  [DEBUG] Всего изображений в spuImage.images: {len(images_list)}")
+            # Убрано избыточное DEBUG логирование image_data структуры
             
             for img in images_list:
                 img_url = img.get('url', '')
@@ -342,15 +337,13 @@ class PoisonAPIClientFixed:
             color_images_map = {}  # propertyValueId → список изображений
             color_block_images = image_data.get('colorBlockImages', {})
             
-            logger.info(f"  [DEBUG] colorBlockImages: {color_block_images}")
-            logger.info(f"  [DEBUG] Тип colorBlockImages: {type(color_block_images)}")
-            logger.info(f"  [DEBUG] Пустой? {not bool(color_block_images)}")
+            # Убрано избыточное DEBUG логирование colorBlockImages
             
             if color_block_images and isinstance(color_block_images, dict) and len(color_block_images) > 0:
-                logger.info(f"  [DEBUG] ✅ Найдено colorBlockImages! Ключи: {list(color_block_images.keys())}")
+                # Убрано DEBUG: logger.debug(f"  [DEBUG] ✅ Найдено colorBlockImages!")
                 
                 for prop_id_str, img_list in color_block_images.items():
-                    logger.info(f"  [DEBUG] Обработка colorBlockImages[{prop_id_str}]: тип={type(img_list)}, содержимое={img_list}")
+                    # Убрано DEBUG: logger.debug(f"  [DEBUG] Обработка colorBlockImages[{prop_id_str}]...")
                     prop_id = int(prop_id_str)
                     color_urls = []
                     
@@ -365,17 +358,17 @@ class PoisonAPIClientFixed:
                     
                     if color_urls:
                         color_images_map[prop_id] = color_urls
-                        logger.info(f"  [DEBUG] Цвет propertyValueId={prop_id}: {len(color_urls)} изображений")
+                        # Убрано DEBUG: изображения для цвета
                     else:
-                        logger.warning(f"  [DEBUG] Цвет propertyValueId={prop_id}: НЕТ изображений в списке")
+                        pass  # Убрано WARNING: нет изображений
             else:
-                logger.info(f"  [DEBUG] ❌ colorBlockImages пустой или отсутствует")
+                pass  # Убрано DEBUG: colorBlockImages пустой
                 
                 # Пробуем разбить общие изображения на группы по цветам
                 # Если есть 4 цвета и 20 изображений, то по 5 изображений на цвет
                 if images and len(color_value_map) > 0:
                     images_per_color = len(images) // len(color_value_map)
-                    logger.info(f"  [DEBUG] Попытка разбить {len(images)} изображений на {len(color_value_map)} цветов = {images_per_color} изображений/цвет")
+                    # Убрано DEBUG: разбивка изображений по цветам
                     
                     color_ids = sorted(color_value_map.keys())
                     for idx, color_id in enumerate(color_ids):
@@ -385,64 +378,60 @@ class PoisonAPIClientFixed:
                         
                         if color_specific_imgs:
                             color_images_map[color_id] = color_specific_imgs
-                            logger.info(f"  [DEBUG] → Цвет {color_value_map[color_id]} (ID={color_id}): изображения [{start_idx}:{end_idx}] = {len(color_specific_imgs)} шт")
+                            # Убрано DEBUG: изображения для каждого цвета
                 
                 if not color_images_map:
-                    logger.info(f"  [DEBUG] Используем только общие изображения SPU для всех вариаций")
+                    pass  # Убрано DEBUG: используем общие изображения
             
-            # DEBUG: логируем полную структуру первых 3 SKU для изучения
-            if skus_array and len(skus_array) > 0:
-                logger.info(f"  [DEBUG] ======== ПОЛНАЯ СТРУКТУРА ПЕРВЫХ 3 SKU ========")
-                for i in range(min(3, len(skus_array))):
-                    sku = skus_array[i]
-                    logger.info(f"  [DEBUG] SKU #{i+1} ПОЛНАЯ СТРУКТУРА:")
-                    for key, value in sku.items():
-                        if key not in ['properties']:  # properties логируем отдельно
-                            logger.info(f"    {key}: {value}")
-                    logger.info(f"    properties: {sku.get('properties', [])}")
-                logger.info(f"  [DEBUG] =================================================")
+            # Убрано избыточное DEBUG логирование структуры SKU
             
             # Формируем вариации
             variations = []
-            logger.info(f"  [DEBUG] Начинаем формировать вариации из {len(prices)} цен")
+            # Убрано DEBUG: начинаем формировать вариации
             for idx_price, (sku_id_str, price_data) in enumerate(prices.items()):
-                logger.info(f"  [DEBUG] Вариация {idx_price+1}/{len(prices)}: SKU={sku_id_str}, цена={price_data.get('price')}¥, остаток={price_data.get('stock')}")
+                # Убрано DEBUG: информация о каждой вариации
                 # Ищем соответствующий SKU в skus_array для получения размера
                 size = None
+                color = None
+                sku_found_in_array = False
                 
-                # Находим SKU в массиве skus_array
-                for idx, sku_item in enumerate(skus_array):
-                    if str(sku_item.get('skuId')) == sku_id_str:
-                        properties = sku_item.get('properties', [])
-                        
-                        logger.info(f"  [DEBUG] SKU {sku_id_str}: properties={properties}")
-                        
-                        # Извлекаем размер и цвет из properties
-                        # properties может содержать [level 1 = цвет, level 2 = размер] или только размер
-                        color = None
-                        
-                        for prop in properties:
-                            property_value_id = prop.get('propertyValueId')
+                # Находим SKU в массиве skus_array (если он не пустой)
+                if skus_array:
+                    for idx, sku_item in enumerate(skus_array):
+                        if str(sku_item.get('skuId')) == sku_id_str:
+                            sku_found_in_array = True
+                            properties = sku_item.get('properties', [])
                             
-                            # Проверяем в каком маппинге находится этот propertyValueId
-                            if property_value_id in size_value_map:
-                                size = size_value_map[property_value_id]
-                                logger.info(f"  [DEBUG] → Размер найден: propertyValueId={property_value_id} → size={size}")
-                            elif property_value_id in color_value_map:
-                                color = color_value_map[property_value_id]
-                                logger.info(f"  [DEBUG] → Цвет найден: propertyValueId={property_value_id} → color={color}")
-                        
-                        # Если размер не найден через properties, используем fallback
-                        if not size:
-                            logger.warning(f"  [DEBUG] Размер не найден через properties, используем fallback")
-                            size_props = [p for p in sale_properties if '尺码' in p.get('name', '')]
-                            if idx < len(size_props):
-                                size = size_props[idx].get('value', '')
-                                logger.info(f"  [DEBUG] → Размер из saleProperties[{idx}]: {size}")
-                        
-                        break
+                            # Убрано DEBUG: SKU properties
+                            
+                            # Извлекаем размер и цвет из properties
+                            # properties может содержать [level 1 = цвет, level 2 = размер] или только размер
+                            
+                            for prop in properties:
+                                property_value_id = prop.get('propertyValueId')
+                                
+                                # Проверяем в каком маппинге находится этот propertyValueId
+                                if property_value_id in size_value_map:
+                                    size = size_value_map[property_value_id]
+                                    # Убрано DEBUG: размер найден
+                                elif property_value_id in color_value_map:
+                                    color = color_value_map[property_value_id]
+                                    # Убрано DEBUG: цвет найден
+                            
+                            # Если размер не найден через properties, используем fallback
+                            if not size:
+                                # Убрано DEBUG: используем fallback
+                                size_props = [p for p in sale_properties if '尺码' in p.get('name', '')]
+                                if idx < len(size_props):
+                                    size = size_props[idx].get('value', '')
+                                    # Убрано DEBUG: размер из saleProperties
+                            
+                            break
+                else:
+                    # skus_array пустой - используем fallback на основе priceInfo
+                    pass  # Убрано DEBUG: skus_array пустой
                 
-                # Если размер не найден, используем SKU ID
+                # Если размер не найден, используем SKU ID как размер
                 if not size or size == 'None':
                     logger.warning(f"  SKU {sku_id_str}: размер не найден, используем SKU ID")
                     size = sku_id_str
@@ -562,8 +551,7 @@ class PoisonAPIClientFixed:
                 }
                 
                 color_ru = color_translations.get(color, color) if color else None
-                if color and color_ru != color:
-                    logger.info(f"  [DEBUG] → Цвет переведен: {color} → {color_ru}")
+                # Убрано DEBUG: перевод цвета
                 
                 # Находим propertyValueId цвета для извлечения изображений
                 color_prop_id = None
@@ -578,9 +566,9 @@ class PoisonAPIClientFixed:
                 color_specific_images = []
                 if color_prop_id and color_prop_id in color_images_map:
                     color_specific_images = color_images_map[color_prop_id]
-                    logger.info(f"  [DEBUG] → Найдено {len(color_specific_images)} изображений для цвета {color}")
+                    # Убрано DEBUG: изображения для цвета
                 
-                logger.info(f"  [DEBUG] → Итог: SKU={sku_id_str}, размер={size}, цвет={color_ru or 'нет'}, цена={price_data.get('price')}¥, остаток={price_data.get('stock')}, изображений={len(color_specific_images)}")
+                # Убрано DEBUG: итоговая информация о вариации
                 
                 # Проверяем цену (должна быть адекватной)
                 price_yuan = price_data['price']
@@ -605,7 +593,7 @@ class PoisonAPIClientFixed:
                 
                 variations.append(variation_data)
             
-            logger.info(f"  Создано вариаций: {len(variations)}")
+            # Убрано DEBUG: создано вариаций
             if variations:
                 sizes = [v['size'] for v in variations[:5]]
                 logger.info(f"  Примеры размеров: {sizes}")
@@ -635,11 +623,21 @@ class PoisonAPIClientFixed:
                         attributes[translated_key] = attr_value
             
             # Извлекаем бренд (пробуем разные источники)
-            brand_name = (
-                brand_data.get('brandName') or
-                detail.get('brandName') or
-                detail.get('title', '').split()[0] if detail.get('title') else 'Unknown'
-            )
+            brand_from_api = brand_data.get('brandName') or brand_data.get('showName')
+            brand_name = brand_from_api or detail.get('brandName')
+            
+            # Если бренд не найден - берем из названия, НО фильтруем служебные префиксы
+            if not brand_name:
+                title = detail.get('title', '')
+                # Убираем китайские служебные префиксы типа 【定制球鞋】, 【联名款】 и т.д.
+                import re
+                # Удаляем текст в 【】 скобках
+                cleaned_title = re.sub(r'【[^】]+】', '', title).strip()
+                # Берем первое слово после очистки
+                brand_name = cleaned_title.split()[0] if cleaned_title else 'Unknown'
+                logger.info(f"⚠️ Бренд не найден в API, извлечен из названия: '{brand_name}'")
+            else:
+                logger.info(f"✅ Бренд из brandRootInfo: '{brand_name}'")
             
             # Маппим категорию в WordPress категорию
             # Перезагружаем модуль category_mapper для актуальных изменений

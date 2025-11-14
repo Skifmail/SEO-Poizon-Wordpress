@@ -13,6 +13,7 @@
     - Flask: веб-фреймворк
     - Server-Sent Events (SSE): потоковая передача прогресса загрузки
     - In-memory кэш: минимизация запросов к API
+    - Файловый кэш: долговременное хранение брендов (обновление раз в месяц)
     - GigaChat API: генерация описаний товаров
 
 Архитектура:
@@ -30,14 +31,19 @@ import logging
 import requests
 import json
 from typing import Dict, List, Optional
-from flask import Flask, render_template, jsonify, request, Response, stream_with_context
+from flask import Flask, render_template, jsonify, request, Response, stream_with_context, redirect, url_for, flash
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 from dataclasses import dataclass, asdict
+from celery_app import celery
+from pathlib import Path
 import time
 import uuid
 from datetime import datetime
-import queue
-import threading
+
+# Импорт задач Celery
+from tasks import process_product_task
 
 # Импорт существующих модулей
 from poizon_to_wordpress_service import (
@@ -46,95 +52,293 @@ from poizon_to_wordpress_service import (
 )
 from poizon_api_fixed import PoisonAPIClientFixed as PoisonAPIService
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.DEBUG,  # Включаем DEBUG для детальной отладки
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('web_app.log', encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Настройка логирования (конфигурируем root logger для совместимости с Flask)
+import logging.handlers
+
+# Создаем папку для логов если не существует
+from pathlib import Path
+log_dir = Path("kash")
+log_dir.mkdir(parents=True, exist_ok=True)
+
+# Создаем и настраиваем handlers
+file_handler = logging.FileHandler('kash/web_app.log', encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+
+# Формат логов
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Настраиваем root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
+# Отключаем DEBUG логи от сторонних библиотек (urllib3, requests и т.д.)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('requests').setLevel(logging.WARNING)
+
+# Настраиваем werkzeug чтобы избежать дублирования
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.INFO)
+werkzeug_logger.propagate = False  # Не передавать логи root logger (избегаем дублей)
+# Добавляем наши handlers напрямую к werkzeug
+werkzeug_logger.addHandler(file_handler)
+werkzeug_logger.addHandler(console_handler)
+
+# Используем root logger напрямую (уже настроен выше с file_handler + console_handler)
+logger = root_logger
 
 # Загрузка переменных окружения
 load_dotenv()
 
 # Инициализация Flask
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.urandom(24)
+# Используем фиксированный SECRET_KEY из .env для стабильности сессий между перезапусками
+secret_key = os.getenv('FLASK_SECRET_KEY')
+if not secret_key:
+    secret_key = os.urandom(24).hex()
+    logger.warning("FLASK_SECRET_KEY не установлен в .env, используется случайный ключ (сессии могут сбрасываться при перезапуске)")
+app.config['SECRET_KEY'] = secret_key
 app.config['JSON_AS_ASCII'] = False
 
 # ============================================================================
-# КЭШИРОВАНИЕ (для минимизации запросов к API)
+# АВТОРИЗАЦИЯ (Flask-Login)
 # ============================================================================
 
-class SimpleCache:
+# Инициализация LoginManager
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+login_manager.login_message = 'Пожалуйста, войдите в систему для доступа к этой странице.'
+login_manager.login_message_category = 'info'
+
+
+class User(UserMixin):
     """
-    Простой in-memory кэш с TTL для минимизации запросов к Poizon API.
+    Класс пользователя для Flask-Login.
     
-    Кэширует результаты API запросов в памяти с временем жизни (TTL).
-    Это значительно ускоряет повторные запросы и экономит лимиты API.
-    
-    Attributes:
-        cache (dict): Хранилище данных {ключ: (данные, timestamp, ttl)}
-        stats (dict): Статистика использования кэша (hits, misses)
+    Используется для управления сессиями авторизованных пользователей.
+    """
+    def __init__(self, user_id: str):
+        """
+        Инициализация пользователя.
         
-    Example:
-        >>> cache = SimpleCache()
-        >>> cache.set('brands', brands_data, ttl=3600)  # Кэш на 1 час
-        >>> brands = cache.get('brands')  # Получение из кэша
+        Args:
+            user_id: Идентификатор пользователя (обычно "admin")
+        """
+        self.id = user_id
+
+
+@login_manager.user_loader
+def load_user(user_id: str):
     """
+    Загружает пользователя по ID для Flask-Login.
     
-    def __init__(self):
-        """Инициализация пустого кэша со статистикой."""
-        self.cache = {}
+    Args:
+        user_id: Идентификатор пользователя
+        
+    Returns:
+        User объект или None
+    """
+    return User(user_id)
+
+
+def verify_password(username: str, password: str) -> bool:
+    """
+    Проверяет логин и пароль пользователя.
+    
+    Пароль хранится в переменных окружения в виде хеша (рекомендуется)
+    или в открытом виде (для простоты настройки).
+    
+    Args:
+        username: Имя пользователя
+        password: Пароль в открытом виде
+        
+    Returns:
+        True если логин и пароль верны, иначе False
+    """
+    admin_username = os.getenv('ADMIN_USERNAME', 'admin')
+    admin_password_hash = os.getenv('ADMIN_PASSWORD_HASH', '')
+    admin_password_plain = os.getenv('ADMIN_PASSWORD', '')
+    
+    # Проверяем имя пользователя
+    if username != admin_username:
+        logger.warning(f"Попытка входа с неправильным логином: {username}")
+        return False
+    
+    # Если есть хеш пароля - проверяем через хеш
+    if admin_password_hash:
+        try:
+            is_valid = check_password_hash(admin_password_hash, password)
+            if is_valid:
+                logger.info(f"Успешная авторизация пользователя: {username}")
+            else:
+                logger.warning(f"Неверный пароль для пользователя: {username}")
+            return is_valid
+        except Exception as e:
+            logger.error(f"Ошибка проверки хеша пароля: {e}")
+            return False
+    
+    # Если есть пароль в открытом виде - сравниваем напрямую
+    if admin_password_plain:
+        is_valid = (password == admin_password_plain)
+        if is_valid:
+            logger.info(f"Успешная авторизация пользователя: {username}")
+        else:
+            logger.warning(f"Неверный пароль для пользователя: {username}")
+        return is_valid
+    
+    # Если не настроены ни хеш, ни пароль - авторизация отключена
+    logger.error("ADMIN_PASSWORD или ADMIN_PASSWORD_HASH не установлены в .env - авторизация отключена!")
+    return False
+
+import redis
+
+# ============================================================================
+# КЭШИРОВАНИЕ (Redis)
+# ============================================================================
+
+class RedisCache:
+    """
+    Унифицированный кэш на основе Redis с TTL и JSON-сериализацией.
+    
+    Заменяет SimpleCache и BrandFileCache, обеспечивая общий кэш для
+    всех рабочих процессов в production-среде.
+    """
+    def __init__(self, redis_url: str):
+        """
+        Инициализация клиента Redis.
+        
+        Args:
+            redis_url: URL для подключения к Redis.
+        """
+        try:
+            # decode_responses=True автоматически декодирует ответы из UTF-8
+            self.redis = redis.from_url(redis_url, decode_responses=True)
+            self.redis.ping()
+            logger.info(f"[CACHE] Успешное подключение к Redis: {redis_url}")
+        except Exception as e:
+            logger.error(f"[CACHE] Ошибка подключения к Redis: {e}")
+            logger.error("[CACHE] Кэширование будет отключено.")
+            self.redis = None
+        
         self.stats = {
             'hits': 0,
             'misses': 0,
-            'requests_saved': 0
+            'sets': 0
         }
-    
-    def get(self, key):
-        """Получить значение из кэша"""
-        if key in self.cache:
-            data, timestamp, ttl = self.cache[key]
-            if time.time() - timestamp < ttl:
-                self.stats['hits'] += 1
-                logger.debug(f"[CACHE HIT] {key}")
-                return data
-            else:
-                del self.cache[key]
+
+    def get(self, key: str) -> Optional[any]:
+        """
+        Получить значение из кэша Redis.
         
-        self.stats['misses'] += 1
-        logger.debug(f"[CACHE MISS] {key}")
-        return None
-    
-    def set(self, key, value, ttl=3600):
-        """Сохранить значение в кэш (TTL в секундах)"""
-        self.cache[key] = (value, time.time(), ttl)
-        logger.debug(f"[CACHE SET] {key} (TTL: {ttl}s)")
-    
+        Args:
+            key: Ключ для поиска.
+            
+        Returns:
+            Десериализованный объект или None, если ключ не найден.
+        """
+        if not self.redis:
+            return None
+            
+        try:
+            value = self.redis.get(key)
+            if value:
+                self.stats['hits'] += 1
+                return json.loads(value)
+            else:
+                self.stats['misses'] += 1
+                return None
+        except Exception as e:
+            logger.error(f"[CACHE] Ошибка получения ключа '{key}' из Redis: {e}")
+            return None
+
+    def set(self, key: str, value: any, ttl: int = 3600):
+        """
+        Сохранить значение в кэш Redis.
+        
+        Args:
+            key: Ключ для сохранения.
+            value: Значение (будет сериализовано в JSON).
+            ttl: Время жизни в секундах.
+        """
+        if not self.redis:
+            return
+            
+        try:
+            serialized_value = json.dumps(value)
+            self.redis.set(key, serialized_value, ex=ttl)
+            self.stats['sets'] += 1
+        except Exception as e:
+            logger.error(f"[CACHE] Ошибка сохранения ключа '{key}' в Redis: {e}")
+
+    def get_or_fetch(self, key: str, fetch_function: callable, ttl: int) -> Optional[any]:
+        """
+        Получает данные из кэша или выполняет функцию для их получения и кэширования.
+        
+        Args:
+            key: Ключ кэша.
+            fetch_function: Функция, которая будет вызвана, если данные не в кэше.
+            ttl: Время жизни для новых данных в кэше.
+            
+        Returns:
+            Данные из кэша или от fetch_function.
+        """
+        cached_data = self.get(key)
+        if cached_data is not None:
+            logger.info(f"[CACHE] Данные для ключа '{key}' найдены в Redis.")
+            return cached_data
+        
+        logger.info(f"[CACHE] Данные для ключа '{key}' не найдены, вызываем fetch_function...")
+        fresh_data = fetch_function()
+        
+        if fresh_data:
+            self.set(key, fresh_data, ttl=ttl)
+            logger.info(f"[CACHE] Новые данные для ключа '{key}' сохранены в Redis (TTL: {ttl}s).")
+            
+        return fresh_data
+
     def get_stats(self):
         """Получить статистику кэша"""
+        if not self.redis:
+            return {'error': 'Redis is not connected'}
+            
         total = self.stats['hits'] + self.stats['misses']
         hit_rate = (self.stats['hits'] / total * 100) if total > 0 else 0
+        
+        try:
+            # Получаем реальное количество ключей из Redis
+            cached_items = self.redis.dbsize()
+        except Exception:
+            cached_items = -1 # Ошибка подключения
+
         return {
             'hits': self.stats['hits'],
             'misses': self.stats['misses'],
             'hit_rate': f"{hit_rate:.1f}%",
-            'requests_saved': self.stats['requests_saved'],
-            'cached_items': len(self.cache)
+            'sets': self.stats['sets'],
+            'cached_items': cached_items
         }
-    
+
     def clear(self):
-        """Очистить весь кэш"""
-        self.cache.clear()
-        logger.info("[CACHE] Кэш очищен")
+        """Очистить весь кэш (в текущей базе данных Redis)"""
+        if not self.redis:
+            return
+        try:
+            self.redis.flushdb()
+            logger.info("[CACHE] Кэш Redis (текущая БД) полностью очищен.")
+        except Exception as e:
+            logger.error(f"[CACHE] Ошибка очистки кэша Redis: {e}")
 
 
-# Создаем глобальный кэш
-cache = SimpleCache()
+# Создаем глобальный кэш на основе Redis
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+cache = RedisCache(redis_url)
+
 
 # ============================================================================
 # КАТЕГОРИИ И ФИЛЬТРАЦИЯ
@@ -144,9 +348,9 @@ cache = SimpleCache()
 CATEGORY_KEYWORDS = {
     # ОБУВЬ (29)
     29: {
-        'keywords': ['鞋', '运动鞋', '板鞋', '跑鞋', '篮球鞋', '足球鞋', 
-                    'shoes', 'sneakers', 'boots', 'sandals', 'trainers', 'loafers'],
-        'search_terms': ['sneakers', 'shoes', 'boots', 'trainers', 'sandals', 'loafers']
+        'keywords': ['鞋', '运动鞋', '板鞋', '跑鞋', '篮球鞋', '足球鞋', '球鞋', '拖鞋', '凉鞋', '靴', '靴子', '滑板鞋',
+                    'shoes', 'sneakers', 'boots', 'sandals', 'trainers', 'loafers', 'slippers', 'footwear'],
+        'search_terms': ['sneakers', 'shoes', 'boots', 'trainers', 'sandals', 'loafers', 'slippers', 'footwear']
     },
     
     # ЖЕНСКАЯ ОДЕЖДА (1000095)
@@ -225,18 +429,6 @@ poizon_client = None
 woocommerce_client = None
 gigachat_client = None
 
-# Очередь для прогресс-событий (SSE)
-progress_queues = {}  # {session_id: queue.Queue()}
-
-
-@dataclass
-class ProcessingStatus:
-    """Статус обработки товара"""
-    product_id: str
-    status: str  # pending, processing, gigachat, wordpress, completed, error
-    progress: int
-    message: str
-    timestamp: str
 
 
 class GigaChatService:
@@ -256,7 +448,68 @@ class GigaChatService:
             self.enabled = True
             self._get_access_token()
         
-        logger.info("[OK] Инициализирован GigaChat клиент")
+        # Убрано: логи инициализации (дублируются в режиме DEBUG)
+    
+    def translate_color(self, color_chinese: str) -> str:
+        """
+        Переводит название цвета с китайского на русский через GigaChat.
+        
+        Args:
+            color_chinese: Название цвета на китайском (например "黑白灰")
+            
+        Returns:
+            Переведенное название цвета на русском
+        """
+        if not self.enabled or not color_chinese:
+            return color_chinese
+        
+        # Быстрая проверка - если уже латиница/кириллица, не переводим
+        if all(ord(c) < 0x4E00 for c in color_chinese.replace(' ', '')):
+            return color_chinese
+        
+        try:
+            url = f"{self.base_url}/chat/completions"
+            
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Content-Type": "application/json",
+            }
+            
+            prompt = f"""Переведи название цвета с китайского на русский.
+
+ЦВЕТ: {color_chinese}
+
+ИНСТРУКЦИЯ:
+- Если это один цвет (例如: "黑色" → "Черный", "白色" → "Белый")
+- Если это комбинация цветов (例如: "黑白" → "Черно-белый", "黑白灰" → "Черно-бело-серый")
+- Отвечай ОДНИМ словом или словосочетанием через дефис
+- Без пояснений, только перевод цвета
+- Первая буква заглавная
+
+ОТВЕТ (только название цвета):"""
+            
+            data = {
+                "model": "GigaChat",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 50
+            }
+            
+            response = requests.post(url, headers=headers, json=data, verify=False, timeout=30)
+            response.raise_for_status()
+            
+            result = response.json()
+            translated = result['choices'][0]['message']['content'].strip()
+            
+            # Очищаем от лишних символов
+            translated = translated.strip('"\'.,;!? \n\r\t')
+            
+            logger.info(f"  [GigaChat] Перевод цвета: '{color_chinese}' → '{translated}'")
+            return translated
+            
+        except Exception as e:
+            logger.warning(f"Ошибка перевода цвета через GigaChat: {e}, используем оригинал")
+            return color_chinese
     
     def _get_access_token(self):
         """Получает access token от GigaChat API"""
@@ -282,7 +535,7 @@ class GigaChatService:
             response = requests.post(url, headers=headers, data=data, verify=False, timeout=30)
             response.raise_for_status()
             self.access_token = response.json()["access_token"]
-            logger.info("[OK] Получен access token GigaChat")
+            # Убрано: логи инициализации (дублируются в режиме DEBUG)
         except Exception as e:
             logger.error(f"Ошибка получения токена GigaChat: {e}")
             if hasattr(e, 'response') and e.response:
@@ -346,7 +599,7 @@ class GigaChatService:
             # Формируем промпт ТОЧНО как в main.py
             prompt = f"""⚠️ КРИТИЧЕСКИ ВАЖНО: 
 1. СНАЧАЛА переведи ВСЕ китайские/японские слова на АНГЛИЙСКИЙ
-2. ЗАТЕМ составь торговое название ТОЛЬКО из латиницы (A-Z) и цифр
+2. ЗАТЕМ составь торговое название ТОЛЬКО из латиницы (A-Z) и цифр всегда с заглавной буквы
 3. НЕ копируй иероглифы - ПЕРЕВОДИ их!
 
 Ты — профессиональный SEO-копирайтер интернет-магазина, специализирующийся на бренде {brand}.
@@ -362,6 +615,9 @@ class GigaChatService:
 - Исходная категория: {category}
 - Атрибуты: {attributes}
 
+КЛЮЧЕВАЯ ФРАЗА: {brand} {product_name} {color} {article_number}
+ВАЖНО: эта ключевая фраза должна присутствовать В ПЕРВОМ АБЗАЦЕ полного описания!
+
 ИНСТРУКЦИЯ ПО ПЕРЕВОДУ:
 - "定制球鞋" → "Custom Sneakers" (или просто убери)
 - "阿卡丽" → транслитерация "Akali" или убери если непонятно
@@ -371,22 +627,34 @@ class GigaChatService:
 
 ДОПОЛНИТЕЛЬНЫЕ ПРАВИЛА:
 ✓ Никогда не придумывай характеристики, которых нет в данных.
-✓ Названия моделей, линейки (Air Jordan 1, Dunk Low, Yeezy 350 V2, Samba OG и т.д.) пиши латиницей и не переводи.
+✓ Названия моделей, линейки (Air Jordan 1, Dunk Low, Yeezy 350 V2, Samba OG и т.д.) пиши латиницей всегда с заглавной буквы и не переводи.
 ✓ Не упоминай другие бренды.
 ✓ Пиши живым, разговорным языком: избегай канцелярита «высококачественный, многофункциональный, превосходный».
 ✓ Используй конкретику: вместо «удобные» – «мягкий воротник не натирает ахилл», вместо «лёгкие» – «вес одной кроссовки 320 г (42 размер)».
-✓ Увеличь объём: краткое описание 280-320 зн., полное 650-850 зн.
+✓ Объём: краткое описание 280-320 зн., ПОЛНОЕ ОПИСАНИЕ МИНИМУМ 800 СИМВОЛОВ (не менее 300 слов!).
 
-В ПОЛНОМ ОПИСАНИИ обязательно раскрой:
+ПРАВИЛА ЧИТАЕМОСТИ (КРИТИЧЕСКИ ВАЖНО!):
+⚠️ АКТИВНЫЙ ГОЛОС: Используй ТОЛЬКО активный голос! Максимум 10% пассивного голоса.
+   ❌ Плохо: "Модель была выпущена в 2021 году", "Кроссовки были созданы для бега"
+   ✅ Хорошо: "Бренд выпустил модель в 2021 году", "Дизайнеры создали кроссовки для бега"
+   ✅ Хорошо: "Кроссовки держат асфальт", "Подошва амортизирует удары", "Материал дышит"
+
+⚠️ КОРОТКИЕ ПРЕДЛОЖЕНИЯ: Максимум 25% предложений длиннее 15 слов!
+   ❌ Плохо: Длинное предложение с множеством придаточных, запятых и деепричастных оборотов, которое трудно читать и понимать.
+   ✅ Хорошо: Пиши короткими фразами. Одна мысль – одно предложение. Максимум 12-15 слов.
+   ✅ Примеры коротких предложений: "Верх из кожи." "Подошва держит асфальт." "Вес 320 грамм."
+
+В ПОЛНОМ ОПИСАНИИ обязательно раскрой (КОРОТКИМИ ПРЕДЛОЖЕНИЯМИ!):
+→ ПЕРВЫЙ АБЗАЦ: начни с ключевой фразы "{brand} {product_name} {color} {article_number}". Кратко опиши товар;
 → визуальный образ (цвет, фактуры, контрасты);
 → материалы и их тактильные ощущения;
 → технологии (если указаны в attributes: Air, Boost, GORE-TEX и т.д.);
-→ с чем носить и куда надевается модель;
-→ выгода для покупателя (лёгкость, устойчивость к погоде, легко чистится, идёт в комплекте доп. шнурки и т.д.).
+→ с чем носить. Куда надевать;
+→ выгода для покупателя (лёгкость, устойчивость к погоде, доп. шнурки и т.д.).
 
-SEO-заголовок ≤ 60 зн., включает бренд и ключевую модель.
-Мета-описание 150-160 зн., заканчивается призывом «Купить с доставкой» / «Закажи онлайн».
-Ключевые слова: 7-10 слов, без повторов, в именительном падеже, через точку с запятой.
+SEO-заголовок ≤ 60 зн., ОБЯЗАТЕЛЬНО включает ТОЧНУЮ ключевую фразу в начале: "{brand} {product_name} {color}" (например: "Nike Dunk Low White Black – купить").
+Мета-описание 150-160 зн., ОБЯЗАТЕЛЬНО включает ключевую фразу в начале, заканчивается призывом «Купить с доставкой» / «Закажи онлайн».
+Ключевые слова: 3-4 слова (Nike; Dunk Low; кроссовки).
 
 ФОРМАТ ОТВЕТА (ровно 6 строк, без пустых, без комментариев):
 1. Название модели СТРОГО в формате: Бренд Модель Артикул (БЕЗ иероглифов, БЕЗ эмодзи, БЕЗ скобок)
@@ -394,13 +662,13 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
 3. Полное описание
 4. SEO Title (только латиница + кириллица, БЕЗ иероглифов)
 5. Meta Description
-6. Ключевые слова
+6. Ключевые слова через точку с запятой (3-4 слова)
 
 КРИТИЧЕСКИ ВАЖНО для строк 1 и 4:
 - ❌ ЗАПРЕЩЕНО использовать китайские/японские иероглифы (定制球鞋、阿卡丽、时尚 и т.д.)
 - ❌ ЗАПРЕЩЕНО использовать спецсимволы (【】、（）等)
 - ✅ ТОЛЬКО латиница (A-Z, a-z) и кириллица (А-Я, а-я)
-- ✅ ОБЯЗАТЕЛЬНО начинай с бренда: {brand}
+- ✅ ОБЯЗАТЕЛЬНО начинай с бренда: {brand} всегда с заглавной буквы
 - ✅ Формат строки 1: "{brand} Модель Артикул" (например: Nike Court Borough BQ5448-115)
 - ✅ Формат строки 4: "{brand} Модель - купить оригинал" (например: Nike Court Borough - купить оригинал)
 
@@ -412,11 +680,11 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
 
 Пример полного ответа (опирайся на стиль):
 1. Nike Dunk Low White Black DD1391-103
-2. Классический двухцветный Dunk Low: белая кожаная основа + чёрные замши на оверлеях. Подошва средней толщины, отличная плотность строчки.
-3. Данный Dunk Low выпущен в 2021 году и повторяет оригинальный цветовой блок 1985-го. Верх полностью из натуральной кожи: гладкая белая на toe-box и медиальной стороне, чёрная замша на swoosh и пяточном ремне. Перфорация в носочной зоне обеспечивает вентиляцию, а внутри – текстильная сетка, приятная к ноге и не вытягивается после 50+ носков. Промежуточная подошва из пеноматериала EVA весит 30 % меньше оригинала, поэтому кроссовок подходит для целодневного городского ношения. Резиновая подметка с концентрическим рисунком держит асфальт и плитку даже в дождь. Идут в комплекте белые шнурки flat, при желании можно заменить на чёрные – в коробке есть вторая пара. Идеальны для джинсов-скинни, карго и летних шорт: универсальный white/black всегда в тренде.
-4. Nike Dunk Low White Black – купить оригинал
-5. Оригинальные Nike Dunk Low white/black в наличии. Бесплатная примерка, доставка по РФ в день заказа.
-6. Nike; Dunk Low; белые; чёрные; кожа; DD1391-103; оригинал; кроссовки"""
+2. Классический двухцветный Dunk Low: белая кожаная основа + чёрные замшевые оверлеи. Подошва средней толщины. Плотная строчка.
+3. Nike Dunk Low White Black DD1391-103 – классика уличного стиля. Nike выпустил эту модель в 2021 году. Дизайн повторяет оригинальный блок 1985-го. Верх сделан из натуральной кожи. Белая гладкая кожа покрывает toe-box. Чёрная замша украшает swoosh и пятку. Перфорация в носке пропускает воздух. Внутри текстильная сетка. Она приятная и не растягивается. Промежуточная подошва из EVA весит на 30% меньше оригинала. Кроссовки подходят для города. Резиновая подметка держит асфальт и плитку. Даже в дождь. В комплекте белые шнурки flat. Есть вторая пара чёрных. Эти кроссовки сочетаются с джинсами-скинни. С карго тоже. С летними шортами отлично. Белый с чёрным всегда в тренде.
+4. Nike Dunk Low White Black DD1391-103 – купить оригинал
+5. Nike Dunk Low White Black DD1391-103 – оригинальные кроссовки в наличии. Бесплатная примерка, доставка по РФ в день заказа. Закажи онлайн!
+6. Nike"""
 
             # Запрос к GigaChat
             logger.info(f"Обработка через GigaChat: {title[:50]}...")
@@ -478,20 +746,15 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
             import re
             
             def clean_chinese_chars(text: str) -> str:
-                """ИЗВЛЕКАЕТ только латиницу, цифры и базовые символы из текста"""
+                """ИЗВЛЕКАЕТ только латиницу, КИРИЛЛИЦУ, цифры и базовые символы из текста"""
                 if not text:
                     return ""
                 
                 original = text
-                logger.info(f"Очистка ШАГ 1 (оригинал): '{text[:80]}'")
+                # Убрано DEBUG: шаги очистки
                 
-                # Проверим первые символы (для отладки)
-                if len(text) > 0:
-                    first_chars = [f"{c}(U+{ord(c):04X})" for c in text[:10]]
-                    logger.info(f"Первые 10 символов: {' '.join(first_chars)}")
-                
-                # НОВЫЙ ПОДХОД: ИЗВЛЕКАЕМ только нужные символы вместо удаления ненужных!
-                # Оставляем: A-Z, a-z, 0-9, пробел, тире, апостроф, точку, запятую
+                # ИЗВЛЕКАЕМ только нужные символы вместо удаления ненужных!
+                # Оставляем: A-Z, a-z, А-Я, а-я, 0-9, пробел, тире, апостроф, точку, запятую
                 result = []
                 for char in text:
                     code = ord(char)
@@ -503,7 +766,14 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
                         code == 0x002D or              # тире -
                         code == 0x0027 or              # апостроф '
                         code == 0x002E or              # точка .
-                        code == 0x002C):               # запятая ,
+                        code == 0x002C or              # запятая ,
+                        code == 0x002F):               # слэш / (для удаления в начале)
+                        result.append(char)
+                    # КИРИЛЛИЦА (русский алфавит)
+                    elif (0x0410 <= code <= 0x042F or  # А-Я
+                          0x0430 <= code <= 0x044F or  # а-я
+                          code == 0x0401 or            # Ё
+                          code == 0x0451):             # ё
                         result.append(char)
                     # Полноширинные латинские (FF21-FF5A)
                     elif 0xFF21 <= code <= 0xFF3A:  # Ａ-Ｚ
@@ -512,22 +782,22 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
                         result.append(chr(code - 0xFEE0))
                     elif 0xFF10 <= code <= 0xFF19:  # ０-９
                         result.append(chr(code - 0xFEE0))
-                    # Все остальное игнорируем (иероглифы, спецсимволы и т.д.)
+                    # Все остальное игнорируем (китайские иероглифы, спецсимволы и т.д.)
                 
                 text = ''.join(result)
-                logger.info(f"Очистка ШАГ 2 (извлечены нужные символы): '{text[:80]}'")
                 
                 # Убираем множественные пробелы
                 text = re.sub(r'\s+', ' ', text).strip()
-                text = text.strip(' -.,')
-                logger.info(f"Очистка ШАГ 3 (финальная): '{text[:80]}'")
+                # Убираем ведущий слэш (GigaChat иногда добавляет /название)
+                text = text.lstrip('/')
+                # Убираем лишние знаки препинания в начале/конце
+                text = text.strip(' -.,/')
                 
                 # Если осталось меньше 3 символов - пустая строка
                 if not text or len(text) < 3:
-                    logger.warning(f"Очистка ИТОГ: '{original[:50]}' → пустая строка (длина={len(text)})")
+                    logger.warning(f"Очистка текста: '{original[:50]}' → пустая строка")
                     return ""
                 
-                logger.info(f"Очистка ИТОГ: '{original[:50]}' → '{text[:80]}'")
                 return text
             
             # Очищаем ВСЕ строки от GigaChat
@@ -566,13 +836,20 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
                 logger.info(f"Бренд '{brand_for_title}' НЕ найден в seo_title, добавляем в начало")
                 seo_title_clean = f"{brand_for_title} {seo_title_clean}"
             
+            # Получаем полное описание
+            full_description = parsed_lines[2] if len(parsed_lines) > 2 else f"Описание {title}"
+            
+            # Очищаем keywords от слешей и китайских символов
+            keywords_raw = parsed_lines[5] if len(parsed_lines) > 5 else f"{brand}, {category}"
+            keywords_clean = clean_chinese_chars(keywords_raw)
+            
             result = {
                 "title_ru": title_clean,
                 "short_description": parsed_lines[1] if len(parsed_lines) > 1 else f"Товар {brand}",
-                "full_description": parsed_lines[2] if len(parsed_lines) > 2 else f"Описание {title}",
+                "full_description": full_description,
                 "seo_title": seo_title_clean,
                 "meta_description": parsed_lines[4] if len(parsed_lines) > 4 else f"{brand} - купить онлайн",
-                "keywords": parsed_lines[5] if len(parsed_lines) > 5 else f"{brand}, {category}"
+                "keywords": keywords_clean
             }
             
             logger.info(f"[OK] GigaChat обработал товар:")
@@ -592,176 +869,22 @@ SEO-заголовок ≤ 60 зн., включает бренд и ключев
             }
 
 
-class ProductProcessor:
-    """Обработчик товаров: Poizon → GigaChat → WordPress"""
-    
-    def __init__(
-        self,
-        poizon: PoisonAPIService,
-        gigachat: GigaChatService,
-        woocommerce: WooCommerceService,
-        settings: SyncSettings,
-        session_id: str = None
-    ):
-        """Инициализация процессора"""
-        self.poizon = poizon
-        self.gigachat = gigachat
-        self.woocommerce = woocommerce
-        self.settings = settings
-        self.session_id = session_id
-        self.processing_status = {}
-    
-    def process_product(self, spu_id: int) -> ProcessingStatus:
-        """
-        Обрабатывает один товар через весь pipeline.
-        
-        Args:
-            spu_id: ID товара в Poizon
-            
-        Returns:
-            Статус обработки
-        """
-        product_key = str(spu_id)
-        
-        try:
-            # Шаг 1: Получение данных из Poizon
-            self._update_status(product_key, 'processing', 10, 'Загрузка из Poizon API...')
-            
-            product = self.poizon.get_product_full_info(spu_id)
-            if not product:
-                return self._update_status(product_key, 'error', 0, 'Не удалось загрузить товар')
-            
-            # КРИТИЧЕСКИ ВАЖНО: ВСЕГДА очищаем бренд из API, НЕ используем override_brand!
-            # override_brand используется только для ПОИСКА товаров, но НЕ для названия!
-            import re
-            def extract_latin_only(text: str) -> str:
-                """Извлекает только латиницу, цифры, тире, точку и слэш"""
-                if not text:
-                    return ""
-                result = []
-                for char in text:
-                    code = ord(char)
-                    if (0x0041 <= code <= 0x005A or   # A-Z
-                        0x0061 <= code <= 0x007A or   # a-z
-                        0x0030 <= code <= 0x0039 or   # 0-9
-                        code == 0x0020 or              # пробел
-                        code == 0x002D or              # тире -
-                        code == 0x002F or              # слэш /
-                        code == 0x002E):               # точка .
-                        result.append(char)
-                return ''.join(result).strip()
-            
-            original_brand = product.brand
-            original_article = product.article_number
-            
-            # ВСЕГДА очищаем бренд из API (он может содержать иероглифы)
-            product.brand = extract_latin_only(product.brand) or "Brand"
-            logger.info(f"Бренд из API: '{original_brand}' → '{product.brand}'")
-            
-            product.article_number = extract_latin_only(product.article_number) or product.article_number
-            logger.info(f"Артикул: '{original_article}' → '{product.article_number}'")
-            
-            # Шаг 2: Обработка через GigaChat
-            self._update_status(product_key, 'gigachat', 40, 'Обработка через GigaChat...')
-            
-            seo_data = self.gigachat.translate_and_generate_seo(
-                title=product.title,
-                description=product.description,
-                category=product.category,
-                brand=product.brand,  # Теперь это очищенный бренд!
-                attributes=product.attributes,
-                article_number=product.article_number
-            )
-            
-            # Обновляем данные товара ВСЕМИ полями из GigaChat
-            product.title = seo_data['title_ru']  # Название модели
-            product.description = seo_data['full_description']  # Полное описание
-            product.short_description = seo_data.get('short_description', '')  # Краткое описание
-            product.seo_title = seo_data.get('seo_title', seo_data['title_ru'])  # SEO Title
-            product.meta_description = seo_data.get('meta_description', '')  # Meta Description
-            product.keywords = seo_data.get('keywords', '')  # Ключевые слова
-            
-            logger.info(f"Обновленные поля товара:")
-            logger.info(f"  product.title: {product.title[:80]}")
-            logger.info(f"  product.seo_title: {product.seo_title[:80]}")
-            
-            # Шаг 3: Проверка существования в WordPress
-            self._update_status(product_key, 'wordpress', 70, 'Проверка существования в WordPress...')
-            
-            existing_id = self.woocommerce.product_exists(product.sku)
-            
-            if existing_id:
-                # Товар уже существует - обновляем только цены и остатки
-                logger.info(f"  Товар существует (ID {existing_id}), обновляем цены и остатки...")
-                self._update_status(product_key, 'wordpress', 75, f'Обновление товара ID {existing_id}...')
-                updated = self.woocommerce.update_product_variations(existing_id, product, self.settings)
-                self._update_status(product_key, 'wordpress', 90, f'Обновлено {updated} вариаций товара ID {existing_id}')
-                message = f'Обновлен товар ID {existing_id} ({updated} вариаций)'
-            else:
-                # Создаем новый товар
-                logger.info(f"  Создаем новый товар...")
-                self._update_status(product_key, 'wordpress', 75, 'Создание нового товара в WordPress...')
-                
-                self._update_status(product_key, 'wordpress', 80, f'Загрузка основной информации (название, цена, категория)...')
-                new_id = self.woocommerce.create_product(product, self.settings)
-                
-                if new_id:
-                    self._update_status(product_key, 'wordpress', 95, f'Товар успешно создан (ID {new_id})')
-                    message = f'Создан товар ID {new_id}'
-                else:
-                    return self._update_status(product_key, 'error', 0, 'Ошибка создания товара в WordPress')
-            
-            # Шаг 4: Завершено
-            return self._update_status(product_key, 'completed', 100, message)
-            
-        except Exception as e:
-            logger.error(f"Ошибка обработки товара {spu_id}: {e}")
-            return self._update_status(product_key, 'error', 0, f'Ошибка: {str(e)}')
-    
-    def _update_status(
-        self,
-        product_id: str,
-        status: str,
-        progress: int,
-        message: str
-    ) -> ProcessingStatus:
-        """Обновляет статус обработки товара и отправляет событие в SSE"""
-        status_obj = ProcessingStatus(
-            product_id=product_id,
-            status=status,
-            progress=progress,
-            message=message,
-            timestamp=datetime.now().isoformat()
-        )
-        self.processing_status[product_id] = status_obj
-        
-        # Отправляем событие в SSE если есть session_id
-        if self.session_id and self.session_id in progress_queues:
-            progress_queues[self.session_id].put({
-                'type': 'status_update',
-                'product_id': product_id,
-                'status': status,
-                'progress': progress,
-                'message': message
-            })
-        
-        return status_obj
-    
-    def get_status(self, product_id: str) -> Optional[ProcessingStatus]:
-        """Получает статус обработки товара"""
-        return self.processing_status.get(product_id)
-
-
 # Инициализация при запуске
 def init_services():
     """Инициализация всех сервисов"""
     global poizon_client, woocommerce_client, gigachat_client
     
+    # Предотвращаем дублирование логов в режиме DEBUG (Flask запускает процесс дважды)
+    # Показываем логи инициализации только в главном процессе
+    is_reloader = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
+    
     try:
         poizon_client = PoisonAPIService()
         woocommerce_client = WooCommerceService()
         gigachat_client = GigaChatService()
-        logger.info("[OK] Все сервисы инициализированы")
+        
+        if not is_reloader:
+            logger.info("[OK] Все сервисы инициализированы")
     except Exception as e:
         logger.error(f"[ERROR] Ошибка инициализации сервисов: {e}")
         raise
@@ -771,10 +894,154 @@ def init_services():
 # API ENDPOINTS
 # ============================================================================
 
+# ============================================================================
+# МАРШРУТЫ АВТОРИЗАЦИИ
+# ============================================================================
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """
+    Страница авторизации пользователя.
+    
+    GET: Отображает форму входа
+    POST: Проверяет логин и пароль, создает сессию пользователя
+    """
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        remember = bool(request.form.get('remember', False))
+        
+        if not username or not password:
+            flash('Пожалуйста, введите логин и пароль', 'error')
+            return render_template('login.html'), 400
+        
+        # Проверяем учетные данные
+        if verify_password(username, password):
+            user = User(username)
+            login_user(user, remember=remember)
+            next_page = request.args.get('next')
+            if next_page:
+                return redirect(next_page)
+            return redirect(url_for('index'))
+        else:
+            flash('Неверный логин или пароль', 'error')
+            logger.warning(f"Неудачная попытка входа: username={username}")
+            return render_template('login.html'), 401
+    
+    # GET запрос - показываем форму входа
+    return render_template('login.html')
+
+
+@app.route('/logout')
+@login_required
+def logout_route():
+    """
+    Выход из системы.
+    
+    Удаляет сессию пользователя и перенаправляет на страницу входа.
+    """
+    username = current_user.id
+    logout_user()
+    logger.info(f"Пользователь вышел из системы: {username}")
+    flash('Вы успешно вышли из системы', 'info')
+    return redirect(url_for('login'))
+
+
+# ============================================================================
+# ЗАЩИЩЕННЫЕ МАРШРУТЫ (требуют авторизации)
+# ============================================================================
+
+@app.before_request
+def require_login():
+    """
+    Автоматически проверяет авторизацию для всех маршрутов кроме /login и статических файлов.
+    """
+    # Разрешаем доступ без авторизации к странице логина и статическим файлам
+    if request.endpoint == 'login' or request.endpoint == 'static' or request.path.startswith('/static/'):
+        return None
+    
+    # Для всех остальных маршрутов требуется авторизация
+    if not current_user.is_authenticated:
+        # Если это API запрос - возвращаем JSON ошибку
+        if request.path.startswith('/api/'):
+            return jsonify({
+                'success': False,
+                'error': 'Требуется авторизация',
+                'login_required': True
+            }), 401
+        # Для обычных страниц - перенаправляем на логин
+        return redirect(url_for('login', next=request.url))
+
+
 @app.route('/')
+@login_required
 def index():
     """Главная страница"""
     return render_template('index.html')
+
+
+@app.route('/update')
+@login_required
+def update_page():
+    """Страница обновления цен и остатков"""
+    return render_template('update.html')
+
+
+# ============================================================================
+# ЗАГРУЗКА БРЕНДОВ (вспомогательные функции)
+# ============================================================================
+
+def fetch_all_brands_from_api(api_client) -> List[Dict]:
+    """
+    Загружает ВСЕ бренды из Poizon API через пагинацию.
+    
+    Используется файловым кэшем для обновления данных раз в месяц.
+    
+    Args:
+        api_client: Экземпляр PoisonAPIService для запросов к API
+    
+    Returns:
+        Список брендов с полями: id, name, logo, products_count
+    """
+    all_brands_raw = []
+    page = 0
+    max_pages = 50  # Максимум 5000 брендов (50 × 100)
+    
+    logger.info("[API] Загрузка всех брендов через пагинацию...")
+    
+    while page < max_pages:
+        brands_page = api_client.get_brands(limit=100, page=page)
+        
+        if not brands_page or len(brands_page) == 0:
+            logger.info(f"[API] Страница {page} пустая - все бренды загружены")
+            break
+        
+        all_brands_raw.extend(brands_page)
+        # Убрано DEBUG: информация о каждой странице
+        
+        # Если получили меньше 100, значит это последняя страница
+        if len(brands_page) < 100:
+            logger.info(f"[API] Последняя страница {page}: {len(brands_page)} брендов")
+            break
+        
+        page += 1
+    
+    logger.info(f"[API] Загружено {len(all_brands_raw)} брендов с {page + 1} страниц")
+    
+    # Фильтруем и форматируем
+    brands_list = []
+    for brand in all_brands_raw:
+        brand_name = brand.get('name', '')
+        if brand_name and brand_name != '热门系列':  # Пропускаем "Горячие серии"
+            brands_list.append({
+                'id': brand.get('id'),
+                'name': brand_name,
+                'logo': brand.get('logo', ''),
+                'products_count': 0
+            })
+    
+    logger.info(f"[API] Отфильтровано брендов: {len(brands_list)}")
+    return brands_list
 
 
 @app.route('/api/brands', methods=['GET'])
@@ -782,25 +1049,24 @@ def get_brands():
     """
     Получает список всех доступных брендов.
     
+    Использует Redis кэш (обновление раз в 30 дней).
+    
     Returns:
         JSON список брендов
     """
     try:
-        # Получаем бренды через API
-        brands_data = poizon_client.get_brands(limit=100)
+        # Ключ и TTL для кэша брендов
+        cache_key = "all_brands"
+        cache_ttl_seconds = 30 * 24 * 60 * 60  # 30 дней
+
+        # Используем новый Redis кэш
+        brands_list = cache.get_or_fetch(
+            key=cache_key,
+            fetch_function=lambda: fetch_all_brands_from_api(poizon_client),
+            ttl=cache_ttl_seconds
+        )
         
-        # Извлекаем названия брендов
-        brands_list = []
-        for brand in brands_data:
-            brand_name = brand.get('name', '')
-            if brand_name and brand_name != '热门系列':  # Пропускаем "Горячие серии"
-                brands_list.append({
-                    'id': brand.get('id'),
-                    'name': brand_name,
-                    'logo': brand.get('logo', '')
-                })
-        
-        logger.info(f"Найдено брендов: {len(brands_list)}")
+        logger.info(f"[API /brands] Возвращаем {len(brands_list)} брендов (из Redis кэша)")
         return jsonify({
             'success': True,
             'brands': brands_list
@@ -917,30 +1183,25 @@ def get_brands_by_category():
         
         # СПЕЦИАЛЬНАЯ ЛОГИКА ДЛЯ ОБУВИ (ID=29) - ПОКАЗЫВАЕМ ВСЕ БРЕНДЫ!
         if category_id == 29:
-            logger.info(f"[ОБУВЬ] Загружаем ВСЕ бренды из API (быстрая загрузка)")
+            logger.info(f"[ОБУВЬ] Загружаем ВСЕ бренды (из Redis кэша)")
             
-            # Получаем все бренды
-            all_brands_info = cache.get('all_brands')
-            if not all_brands_info:
-                all_brands = poizon_client.get_brands(limit=100)
-                all_brands_info = []
-                for b in all_brands:
-                    if b.get('name') and b.get('name') != '热门系列':
-                        all_brands_info.append({
-                            'id': b.get('id'),
-                            'name': b.get('name'),
-                            'logo': b.get('logo', ''),
-                            'products_count': 0
-                        })
-                cache.set('all_brands', all_brands_info, ttl=43200)
-                logger.info(f"[CACHE] Информация о брендах сохранена")
+            # Ключ и TTL для кэша брендов
+            cache_key_all_brands = "all_brands"
+            cache_ttl_seconds = 30 * 24 * 60 * 60  # 30 дней
+
+            # Используем новый Redis кэш
+            all_brands_info = cache.get_or_fetch(
+                key=cache_key_all_brands,
+                fetch_function=lambda: fetch_all_brands_from_api(poizon_client),
+                ttl=cache_ttl_seconds
+            )
             
             # Сортируем по алфавиту
             brands_list = sorted(all_brands_info, key=lambda x: x['name'])
             
-            logger.info(f"[ОБУВЬ] Возвращаем {len(brands_list)} брендов (все бренды API)")
+            logger.info(f"[ОБУВЬ] Возвращаем {len(brands_list)} брендов (из Redis кэша)")
             
-            # Кэшируем на 24 часа (для обуви долгий кэш)
+            # Кэшируем результат для этой категории (ID 29) на 24 часа
             cache.set(cache_key, brands_list, ttl=86400)
             
             return jsonify({
@@ -1090,7 +1351,8 @@ def manual_search():
         
         # Поиск по ключевому слову
         logger.info(f"Поиск по ключевому слову: '{query}'")
-        products = poizon_client.search_products(keyword=query, limit=50)
+        # Убрано ограничение limit=50, теперь вернет максимум доступных результатов (обычно 100)
+        products = poizon_client.search_products(keyword=query)
         
         formatted_products = []
         for product in products:
@@ -1162,9 +1424,21 @@ def get_products():
         brand = request.args.get('brand', '')
         category = request.args.get('category', '')
         category_id = request.args.get('category_id', type=int)
-        page = int(request.args.get('page', 0))
+        
+        # Безопасная обработка page параметра
+        try:
+            page = int(request.args.get('page', 0))
+        except (ValueError, TypeError):
+            page = 0
+            
         limit = int(request.args.get('limit', 20))
         
+        # Проверка на undefined/null значения
+        if brand == 'undefined' or brand == 'null':
+            brand = ''
+        if category == 'undefined' or category == 'null':
+            category = ''
+            
         if not brand and not category and not category_id:
             return jsonify({
                 'success': False,
@@ -1177,25 +1451,33 @@ def get_products():
         else:
             keyword = category
         
-        logger.info(f"Поиск товаров: brand={brand}, category_id={category_id}")
+        logger.info(f"Поиск товаров: brand={brand}, category_id={category_id}, page={page}")
         
-        # МНОЖЕСТВЕННАЯ ПАГИНАЦИЯ для получения ВСЕХ товаров!
+        # УМНАЯ ПАГИНАЦИЯ: загружаем по 10 страниц API за раз (1000 товаров)
+        # Это дает хороший баланс между скоростью и полнотой данных
         all_products = []
-        max_pages = 5  # До 500 товаров
+        pages_per_batch = 10  # Загружаем по 10 страниц API за раз
+        start_page = page * pages_per_batch  # Начальная страница для этого батча
+        is_last_batch = False  # Флаг: достигли конца данных API
         
-        for p in range(max_pages):
+        for p in range(start_page, start_page + pages_per_batch):
             products_page = poizon_client.search_products(keyword=keyword, limit=100, page=p)
             
             if not products_page or len(products_page) == 0:
+                logger.info(f"  API страница {p}: пустая, останавливаем загрузку")
+                is_last_batch = True
                 break
             
             all_products.extend(products_page)
-            logger.info(f"  Страница {p}: найдено {len(products_page)} товаров")
+            logger.info(f"  API страница {p}: найдено {len(products_page)} товаров")
             
+            # Если API вернул меньше 100 товаров - это последняя страница
             if len(products_page) < 100:
+                logger.info(f"  Получена последняя API страница (товаров < 100)")
+                is_last_batch = True
                 break
         
-        logger.info(f"ВСЕГО найдено товаров: {len(all_products)}")
+        logger.info(f"ВСЕГО загружено из API: {len(all_products)} товаров (страницы {start_page}-{start_page + pages_per_batch - 1})")
         
         # Дедупликация
         unique_products = {}
@@ -1229,13 +1511,17 @@ def get_products():
                 'price': product.get('price', 0)
             })
         
-        logger.info(f"Возвращаем товаров: {len(formatted_products)}")
+        # Определяем, есть ли еще товары
+        # Если достигли конца API данных (последняя страница или пустой ответ), то has_more=False
+        has_more = not is_last_batch
+        
+        logger.info(f"Возвращаем товаров: {len(formatted_products)}, has_more={has_more}")
         return jsonify({
             'success': True,
             'products': formatted_products,
             'total': len(formatted_products),
             'page': page,
-            'has_more': False  # Все товары загружены
+            'has_more': has_more  # Есть ли еще товары для загрузки
         })
         
     except Exception as e:
@@ -1246,68 +1532,19 @@ def get_products():
         }), 500
 
 
-@app.route('/api/progress/<session_id>')
-def progress_stream(session_id):
-    """
-    SSE endpoint для получения прогресса обработки в реальном времени
-    """
-    def generate():
-        # Создаем очередь для этой сессии если ее нет
-        if session_id not in progress_queues:
-            progress_queues[session_id] = queue.Queue()
-        
-        q = progress_queues[session_id]
-        
-        try:
-            while True:
-                # Ждем сообщение из очереди (timeout 30 сек)
-                try:
-                    message = q.get(timeout=30)
-                    
-                    # Если получили 'DONE' - завершаем
-                    if message == 'DONE':
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        break
-                    
-                    # Отправляем сообщение клиенту
-                    yield f"data: {json.dumps(message)}\n\n"
-                    
-                except queue.Empty:
-                    # Отправляем keepalive каждые 30 секунд
-                    yield f"data: {json.dumps({'type': 'keepalive'})}\n\n"
-                    
-        finally:
-            # Очищаем очередь после завершения
-            if session_id in progress_queues:
-                del progress_queues[session_id]
-    
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream',
-        headers={
-            'Cache-Control': 'no-cache',
-            'X-Accel-Buffering': 'no'
-        }
-    )
-
-
 @app.route('/api/upload', methods=['POST'])
 def upload_products():
     """
-    Загружает выбранные товары в WordPress через GigaChat.
-    Возвращает session_id для отслеживания прогресса через SSE.
+    Starts the background processing of selected products using Celery.
     
     Request body:
         {
-            "product_ids": [123, 456, 789],
-            "settings": {
-                "currency_rate": 13.5,
-                "markup_rubles": 5000
-            }
+            "product_ids": [123, 456],
+            "settings": { "currency_rate": 13.5, "markup_rubles": 5000 }
         }
         
     Returns:
-        JSON с session_id для подключения к SSE
+        JSON with a list of task IDs for the created background jobs.
     """
     try:
         data = request.get_json()
@@ -1315,111 +1552,71 @@ def upload_products():
         settings_data = data.get('settings', {})
         
         if not product_ids:
-            return jsonify({
-                'success': False,
-                'error': 'Не выбраны товары'
-            }), 400
+            return jsonify({'success': False, 'error': 'Не выбраны товары'}), 400
         
-        # Генерируем уникальный session_id
-        session_id = str(uuid.uuid4())
+        logger.info(f"Получен запрос на загрузку {len(product_ids)} товаров. Настройки: {settings_data}")
         
-        # Создаем очередь для этой сессии
-        progress_queues[session_id] = queue.Queue()
-        
-        # Создаем настройки
-        settings = SyncSettings(
-            currency_rate=settings_data.get('currency_rate', 13.5),
-            markup_rubles=settings_data.get('markup_rubles', 5000)
-        )
-        
-        logger.info(f"Загрузка товаров: ids={product_ids}")
-        
-        # Запускаем обработку в отдельном потоке
-        def process_products_thread():
+        task_ids = []
+        for spu_id in product_ids:
             try:
-                # Создаем процессор с передачей session_id
-                processor = ProductProcessor(
-                    poizon_client,
-                    gigachat_client,
-                    woocommerce_client,
-                    settings,
-                    session_id  # Передаем session_id в процессор
-                )
-                
-                # Отправляем начальное сообщение
-                progress_queues[session_id].put({
-                    'type': 'start',
-                    'total': len(product_ids),
-                    'message': f'Начинаем обработку {len(product_ids)} товаров...'
-                })
-                
-                # Обрабатываем товары
-                results = []
-                for idx, spu_id in enumerate(product_ids, 1):
-                    progress_queues[session_id].put({
-                        'type': 'product_start',
-                        'current': idx,
-                        'total': len(product_ids),
-                        'spu_id': spu_id,
-                        'message': f'[{idx}/{len(product_ids)}] Обработка товара {spu_id}...'
-                    })
-                    
-                    # Обрабатываем товар (бренд будет взят из Poizon API и очищен)
-                    status = processor.process_product(spu_id)
-                    results.append(asdict(status))
-                    
-                    # Отправляем результат обработки товара
-                    progress_queues[session_id].put({
-                        'type': 'product_done',
-                        'current': idx,
-                        'total': len(product_ids),
-                        'spu_id': spu_id,
-                        'status': status.status,
-                        'message': status.message
-                    })
-                
-                # Отправляем финальное сообщение
-                completed = sum(1 for r in results if r['status'] == 'completed')
-                errors = sum(1 for r in results if r['status'] == 'error')
-                
-                progress_queues[session_id].put({
-                    'type': 'complete',
-                    'results': results,
-                    'total': len(results),
-                    'completed': completed,
-                    'errors': errors,
-                    'message': f'Готово! Успешно: {completed}, Ошибок: {errors}'
-                })
-                
-                # Сигнал завершения
-                progress_queues[session_id].put('DONE')
-                
-            except Exception as e:
-                logger.error(f"Ошибка в потоке обработки: {e}")
-                if session_id in progress_queues:
-                    progress_queues[session_id].put({
-                        'type': 'error',
-                        'message': f'Критическая ошибка: {str(e)}'
-                    })
-                    progress_queues[session_id].put('DONE')
-        
-        # Запускаем поток
-        thread = threading.Thread(target=process_products_thread, daemon=True)
-        thread.start()
-        
-        # Сразу возвращаем session_id клиенту
+                # Ensure spu_id is an integer
+                spu_id_int = int(spu_id)
+                # Dispatch the task to Celery workers
+                task = process_product_task.delay(spu_id_int, settings_data)
+                task_ids.append(task.id)
+                logger.info(f"Товар {spu_id_int} отправлен в очередь. Task ID: {task.id}")
+            except (ValueError, TypeError) as e:
+                logger.error(f"Неверный SPU ID: {spu_id}. Ошибка: {e}")
+
         return jsonify({
             'success': True,
-            'session_id': session_id,
-            'total': len(product_ids)
+            'message': f'Задачи для {len(task_ids)} товаров успешно созданы.',
+            'task_ids': task_ids
         })
         
     except Exception as e:
-        logger.error(f"Ошибка загрузки товаров: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        logger.error(f"Ошибка в /api/upload: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/task_status/<task_id>', methods=['GET'])
+def get_task_status(task_id: str):
+    """
+    Retrieves the status of a Celery background task.
+    
+    This is polled by the frontend to show real-time progress.
+    """
+    try:
+        task = celery.AsyncResult(task_id)
+        
+        response_data = {
+            'task_id': task_id,
+            'state': task.state
+        }
+        
+        if task.state == 'PENDING':
+            response_data['status'] = 'Задача в очереди...'
+            response_data['progress'] = 0
+        elif task.state == 'PROGRESS':
+            response_data['status'] = task.info.get('message', 'В обработке...')
+            response_data['progress'] = task.info.get('progress', 0)
+            response_data['product_id'] = task.info.get('product_id', '')
+        elif task.state == 'SUCCESS':
+            response_data['status'] = task.info.get('message', 'Завершено')
+            response_data['progress'] = 100
+            response_data['result'] = task.result
+        elif task.state == 'FAILURE':
+            response_data['status'] = task.info.get('message', 'Произошла ошибка')
+            response_data['progress'] = 0
+            # task.result contains the exception
+            response_data['error'] = str(task.result)
+
+        return jsonify({'success': True, 'task': response_data})
+
+    except Exception as e:
+        logger.error(f"Ошибка получения статуса задачи {task_id}: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 
 @app.route('/api/status/<product_id>', methods=['GET'])
@@ -1482,69 +1679,154 @@ def get_wordpress_categories():
 @app.route('/api/wordpress/products', methods=['GET'])
 def get_wordpress_products():
     """
-    Получает список товаров из WordPress для обновления.
+    Получает список товаров из WordPress для обновления (ЛЕГКОВЕСНЫЙ - без загрузки вариаций).
+    Товары всегда отсортированы от старых к новым по дате обновления.
     
     Query params:
+        page: номер страницы (default=1)
+        per_page: товаров на странице (default=20)
         categories: Список ID категорий через запятую (необязательно)
+        date_created_after: дата в формате YYYY-MM-DD (фильтр создания)
+        product_id: ID конкретного товара для поиска (необязательно)
     
     Returns:
-        JSON список товаров с текущими ценами и остатками
+        JSON с товарами, пагинацией, без полной загрузки вариаций
+        Товары отсортированы по дате обновления (от старых к новым)
     """
     try:
-        # Получаем фильтр по категориям
+        # Параметры пагинации
+        page = int(request.args.get('page', 1))
+        per_page = int(request.args.get('per_page', 20))
+        
+        # Фильтры
         category_filter = request.args.get('categories', '')
-        selected_category_ids = []
-        if category_filter:
-            selected_category_ids = [int(c.strip()) for c in category_filter.split(',') if c.strip().isdigit()]
-            logger.info(f"Фильтр по категориям: {selected_category_ids}")
+        date_created_after = request.args.get('date_created_after', '')
+        product_id = request.args.get('product_id', '')  # Новый параметр для поиска по ID
         
-        # Загружаем товары
-        # Получаем товары из WordPress
-        wc_products = woocommerce_client.get_all_products()
-        
-        # Фильтруем только variable товары
-        variable_products = []
-        for product in wc_products:
-            if product.get('type') == 'variable':
-                # Фильтр по категориям (если указан)
-                if selected_category_ids:
-                    product_categories = product.get('categories', [])
-                    product_category_ids = [cat['id'] for cat in product_categories]
-                    
-                    # Проверяем что товар в одной из выбранных категорий
-                    if not any(cat_id in selected_category_ids for cat_id in product_category_ids):
-                        continue  # Пропускаем товар если он не в выбранных категориях
+        # Если указан product_id - ищем только этот товар
+        if product_id:
+            try:
+                product_id_int = int(product_id)
+                logger.info(f"Поиск товара по ID: {product_id_int}")
                 
-                # Получаем вариации
-                product_id = product['id']
-                variations = woocommerce_client.get_product_variations(product_id)
+                # Запрос одного товара
+                url = f"{woocommerce_client.url}/wp-json/wc/v3/products/{product_id_int}"
                 
-                # Подсчитываем общий остаток
-                total_stock = sum(int(v.get('stock_quantity', 0) or 0) for v in variations)
+                response = requests.get(
+                    url,
+                    auth=woocommerce_client.auth,
+                    verify=False,
+                    timeout=30
+                )
                 
-                # Находим мин/макс цены
-                prices = [float(v.get('regular_price', 0) or 0) for v in variations if v.get('regular_price')]
-                min_price = min(prices) if prices else 0
-                max_price = max(prices) if prices else 0
+                if response.status_code == 404:
+                    return jsonify({
+                        'success': False,
+                        'error': f'Товар с ID {product_id_int} не найден'
+                    }), 404
                 
-                variable_products.append({
-                    'id': product_id,
+                response.raise_for_status()
+                product = response.json()
+                
+                # Проверяем что это вариативный товар
+                if product.get('type') != 'variable':
+                    return jsonify({
+                        'success': False,
+                        'error': f'Товар ID {product_id_int} не является вариативным товаром'
+                    }), 400
+                
+                logger.info(f"Найден товар: {product.get('name')}")
+                
+                # Формируем ответ для одного товара
+                result_product = {
+                    'id': product['id'],
                     'sku': product.get('sku', ''),
                     'name': product.get('name', ''),
                     'image': product.get('images', [{}])[0].get('src', '') if product.get('images') else '',
-                    'variations_count': len(variations),
-                    'total_stock': total_stock,
-                    'min_price': min_price,
-                    'max_price': max_price,
                     'date_created': product.get('date_created', ''),
-                    'date_modified': product.get('date_modified', '')
+                    'date_modified': product.get('date_modified', ''),
+                }
+                
+                return jsonify({
+                    'success': True,
+                    'products': [result_product],
+                    'pagination': {
+                        'current_page': 1,
+                        'per_page': 1,
+                        'total_pages': 1,
+                        'total_items': 1
+                    }
                 })
+                
+            except ValueError:
+                return jsonify({
+                    'success': False,
+                    'error': 'product_id должен быть числом'
+                }), 400
         
-        logger.info(f"Найдено товаров в WordPress: {len(variable_products)}")
+        # Обычный поиск со списком товаров
+        selected_category_ids = []
+        if category_filter:
+            selected_category_ids = [int(c.strip()) for c in category_filter.split(',') if c.strip().isdigit()]
+        
+        logger.info(f"Запрос товаров WordPress: page={page}, per_page={per_page}, categories={selected_category_ids}")
+        
+        # Параметры запроса к WordPress API
+        # Всегда сортируем от старых к новым по дате обновления
+        params = {
+            'type': 'variable',  # Только вариативные товары
+            'page': page,
+            'per_page': per_page,
+            'orderby': 'modified',
+            'order': 'asc'  # От старых к новым по дате обновления
+        }
+        
+        if selected_category_ids:
+            params['category'] = ','.join(map(str, selected_category_ids))
+        
+        if date_created_after:
+            params['after'] = date_created_after + 'T00:00:00'
+        
+        # Запрос к WordPress API
+        url = f"{woocommerce_client.url}/wp-json/wc/v3/products"
+        
+        response = requests.get(
+            url,
+            auth=woocommerce_client.auth,
+            params=params,
+            verify=False,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        products = response.json()
+        total_pages = int(response.headers.get('X-WP-TotalPages', 1))
+        total_filtered = int(response.headers.get('X-WP-Total', 0))
+        
+        logger.info(f"Получено товаров: {len(products)}, всего: {total_filtered}, страниц: {total_pages}")
+        
+        # Формируем легковесный ответ (БЕЗ загрузки вариаций!)
+        result_products = []
+        for product in products:
+            result_products.append({
+                'id': product['id'],
+                'sku': product.get('sku', ''),
+                'name': product.get('name', ''),
+                'image': product.get('images', [{}])[0].get('src', '') if product.get('images') else '',
+                'date_created': product.get('date_created', ''),
+                'date_modified': product.get('date_modified', ''),
+                # Информацию о вариациях получим при обновлении
+            })
+        
         return jsonify({
             'success': True,
-            'products': variable_products,
-            'total': len(variable_products)
+            'products': result_products,
+            'pagination': {
+                'current_page': page,
+                'per_page': per_page,
+                'total_pages': total_pages,
+                'total_items': total_filtered
+            }
         })
         
     except Exception as e:
@@ -1698,41 +1980,37 @@ def update_prices_and_stock():
                         else:
                             logger.info(f"  Используем сохраненный spuId: {spu_id} (надежно!)")
                         
-                        # Получаем полную информацию о товаре
+                        # ОПТИМИЗАЦИЯ: Обновляем только цены и остатки (без полной загрузки товара!)
                         progress_queues[session_id].put({
                             'type': 'status_update',
-                            'message': f'  → Загрузка вариаций из Poizon (SPU: {spu_id})...'
+                            'message': f'  → Загрузка цен из Poizon (SPU: {spu_id})...'
                         })
                         
-                        full_product = poizon_client.get_product_full_info(spu_id)
+                        # Используем быстрый метод - только цены и остатки, без изображений/переводов/категорий
+                        updated = woocommerce_client.update_product_prices_only(
+                            wc_product_id,
+                            spu_id,
+                            settings.currency_rate,
+                            settings.markup_rubles,
+                            poizon_client  # Передаем клиент Poizon
+                        )
                         
-                        if not full_product or not full_product.variations:
+                        if updated < 0:  # Ошибка получения цен
                             progress_queues[session_id].put({
                                 'type': 'product_done',
                                 'current': idx,
                                 'status': 'error',
-                                'message': f'[{idx}/{len(product_ids)}] Вариаций не найдено'
+                                'message': f'[{idx}/{len(product_ids)}] Не удалось получить цены'
                             })
-                            results.append({'product_id': wc_product_id, 'status': 'error', 'message': 'Вариаций не найдено'})
+                            results.append({'product_id': wc_product_id, 'status': 'error', 'message': 'Не удалось получить цены'})
                             error_count += 1
                             continue
                         
                         # Обновляем вариации
                         progress_queues[session_id].put({
                             'type': 'status_update',
-                            'message': f'  → Найдено {len(full_product.variations)} вариаций'
-                        })
-                        
-                        progress_queues[session_id].put({
-                            'type': 'status_update',
                             'message': f'  → Обновление цен и остатков в WordPress...'
                         })
-                        
-                        updated = woocommerce_client.update_product_variations(
-                            wc_product_id,
-                            full_product,
-                            settings
-                        )
                         
                         if updated > 0:
                             progress_queues[session_id].put({
@@ -1831,9 +2109,12 @@ def update_prices_and_stock():
 
 if __name__ == '__main__':
     try:
-        logger.info("="*70)
-        logger.info("ЗАПУСК ВЕБ-ПРИЛОЖЕНИЯ POIZON → WORDPRESS")
-        logger.info("="*70)
+        # Предотвращаем дублирование логов в режиме DEBUG (Flask запускает процесс дважды)
+        # Логи инициализации показываем только в главном процессе
+        if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+            logger.info("="*70)
+            logger.info("ЗАПУСК ВЕБ-ПРИЛОЖЕНИЯ POIZON → WORDPRESS")
+            logger.info("="*70)
         
         # Инициализация сервисов
         init_services()
@@ -1842,9 +2123,11 @@ if __name__ == '__main__':
         port = int(os.getenv('WEB_APP_PORT', 5000))
         debug = os.getenv('WEB_APP_DEBUG', 'True').lower() == 'true'
         
-        logger.info(f"Запуск веб-сервера на http://localhost:{port}")
-        logger.info("Для остановки нажмите Ctrl+C")
-        logger.info("="*70)
+        # Логи запуска показываем только в главном процессе
+        if os.environ.get('WERKZEUG_RUN_MAIN') != 'true':
+            logger.info(f"Запуск веб-сервера на http://localhost:{port}")
+            logger.info("Для остановки нажмите Ctrl+C")
+            logger.info("="*70)
         
         # Для продакшена используем 0.0.0.0 для доступа извне
         # В продакшене host должен быть 0.0.0.0, но безопасность обеспечивается Nginx

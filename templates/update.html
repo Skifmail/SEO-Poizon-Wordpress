@@ -1,0 +1,1019 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Обновление цен и остатков - Poizon → WordPress</title>
+    
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px 40px;
+            text-align: center;
+            position: relative;
+        }
+        
+        .header .logout-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .header .logout-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+            border-color: rgba(255, 255, 255, 0.5);
+            color: white;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 16px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .filters-section {
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 25px;
+            margin-bottom: 30px;
+        }
+
+        .filter-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .filter-group label {
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #495057;
+            font-size: 14px;
+        }
+
+        .filter-group input,
+        .filter-group select {
+            padding: 10px 15px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+
+        .filter-group input:focus,
+        .filter-group select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .filter-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #218838;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+        }
+
+        .btn-success:disabled {
+            background: #94d3a2;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .products-section {
+            margin-top: 30px;
+        }
+
+        .products-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .products-header h2 {
+            font-size: 24px;
+            color: #212529;
+        }
+
+        .select-all-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .select-all-wrapper input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .products-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            border: 1px solid #dee2e6;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .products-table thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .products-table th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .products-table td {
+            padding: 15px;
+            border-top: 1px solid #dee2e6;
+            font-size: 14px;
+        }
+
+        .products-table tbody tr {
+            transition: background-color 0.2s;
+        }
+
+        .products-table tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        .products-table tbody tr.updating {
+            background-color: #fff3cd;
+        }
+
+        .products-table tbody tr.updated {
+            background-color: #d4edda;
+        }
+
+        .products-table tbody tr.error {
+            background-color: #f8d7da;
+        }
+
+        .product-image {
+            width: 60px;
+            height: 60px;
+            object-fit: cover;
+            border-radius: 8px;
+        }
+
+        .product-name {
+            font-weight: 600;
+            color: #212529;
+            max-width: 300px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .product-status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .status-idle {
+            background: #e9ecef;
+            color: #495057;
+        }
+
+        .status-updating {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-completed {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+            margin-top: 30px;
+            flex-wrap: wrap;
+        }
+
+        .pagination button {
+            padding: 8px 16px;
+            border: 2px solid #667eea;
+            background: white;
+            color: #667eea;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .pagination button:hover:not(:disabled) {
+            background: #667eea;
+            color: white;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination button.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .pagination-info {
+            color: #6c757d;
+            font-size: 14px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .progress-container {
+            margin-top: 20px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            display: none;
+        }
+
+        .progress-container.active {
+            display: block;
+        }
+
+        .progress-bar-wrapper {
+            background: #e9ecef;
+            border-radius: 8px;
+            height: 30px;
+            overflow: hidden;
+            margin-bottom: 15px;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .progress-log {
+            max-height: 300px;
+            overflow-y: auto;
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .progress-log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+            border-radius: 4px;
+        }
+
+        .progress-log-entry.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .progress-log-entry.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .progress-log-entry.info {
+            color: #004085;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        .empty-state h3 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        .empty-state p {
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div style="display: flex; align-items: center; justify-content: space-between; max-width: 1200px; margin: 0 auto;">
+                <a href="/" style="color: white; text-decoration: none; display: flex; align-items: center; gap: 8px; font-size: 16px; padding: 8px 16px; background: rgba(255, 255, 255, 0.2); border-radius: 8px; transition: background 0.3s;" onmouseover="this.style.background='rgba(255, 255, 255, 0.3)'" onmouseout="this.style.background='rgba(255, 255, 255, 0.2)'">
+                    <span style="font-size: 20px;">←</span>
+                    <span>Вернуться к загрузке</span>
+                </a>
+                <div style="flex: 1; text-align: center;">
+                    <h1 style="margin: 0;">🔄 Обновление цен и остатков</h1>
+                    <p style="margin: 10px 0 0 0;">Быстрое обновление данных из Poizon API</p>
+                </div>
+                <a href="/logout" class="logout-btn" title="Выйти из системы">
+                    <i class="fas fa-sign-out-alt"></i> Выход
+                </a>
+            </div>
+        </div>
+
+        <div class="content">
+            <!-- Фильтры -->
+            <div class="filters-section">
+                <h3 style="margin-bottom: 20px; color: #212529;">⚙️ Настройки и фильтры</h3>
+                
+                <!-- Поиск по артикулу WordPress -->
+                <div style="background: #fff3cd; border-radius: 8px; padding: 15px; margin-bottom: 20px; border-left: 4px solid #ffc107;">
+                    <label style="font-weight: 600; margin-bottom: 10px; display: block; color: #856404;">
+                        🔍 Быстрый поиск по артикулу WordPress
+                    </label>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" 
+                               id="productIdSearch" 
+                               placeholder="Введите ID товара WordPress (например: 22405, 22362, 18111)"
+                               style="flex: 1; padding: 10px 15px; border: 2px solid #ffc107; border-radius: 8px; font-size: 14px;"
+                               onkeypress="if(event.key==='Enter') searchByProductId()">
+                        <button class="btn btn-primary" onclick="searchByProductId()" style="background: #ffc107; color: #000;">
+                            🔍 Найти и обновить
+                        </button>
+                    </div>
+                    <small style="color: #856404; display: block; margin-top: 8px;">
+                        💡 Поиск товара по ID и автоматическое обновление цены/остатков
+                    </small>
+                </div>
+                
+                <div class="filter-row">
+                    <div class="filter-group">
+                        <label>💱 Курс валюты (₽)</label>
+                        <input type="number" id="currencyRate" value="13.5" step="0.1" min="1">
+                    </div>
+                    <div class="filter-group">
+                        <label>💰 Наценка (₽)</label>
+                        <input type="number" id="markupRubles" value="5000" step="100" min="0">
+                    </div>
+                    <div class="filter-group">
+                        <label>📅 Создан после</label>
+                        <input type="date" id="dateCreatedAfter">
+                    </div>
+                </div>
+                
+                <div style="margin-top: 15px; padding: 10px; background: #e3f2fd; border-radius: 8px; border-left: 4px solid #2196f3;">
+                    <small style="color: #1565c0;">
+                        📊 Товары отсортированы от самых старых к новым по дате обновления
+                    </small>
+                </div>
+
+                <div class="filter-actions">
+                    <button class="btn btn-primary" onclick="loadProducts()">
+                        🔍 Загрузить товары
+                    </button>
+                    <button class="btn btn-secondary" onclick="resetFilters()">
+                        ↺ Сбросить фильтры
+                    </button>
+                </div>
+            </div>
+
+            <!-- Прогресс обновления -->
+            <div id="progressContainer" class="progress-container">
+                <h3 style="margin-bottom: 15px;">📊 Прогресс обновления</h3>
+                <div class="progress-bar-wrapper">
+                    <div id="progressBar" class="progress-bar" style="width: 0%">0%</div>
+                </div>
+                <div id="progressLog" class="progress-log"></div>
+            </div>
+
+            <!-- Список товаров -->
+            <div class="products-section">
+                <div class="products-header">
+                    <h2>📦 Товары для обновления</h2>
+                    <div class="select-all-wrapper">
+                        <input type="checkbox" id="selectAll" onchange="toggleSelectAll()">
+                        <label for="selectAll" style="cursor: pointer; user-select: none;">Выбрать все на странице</label>
+                        <button id="updateSelectedBtn" class="btn btn-success" onclick="updateSelected()" disabled>
+                            ✓ Обновить выбранные (<span id="selectedCount">0</span>)
+                        </button>
+                    </div>
+                </div>
+
+                <div id="productsContainer">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📦</div>
+                        <h3>Товары не загружены</h3>
+                        <p>Нажмите "Загрузить товары" для начала работы</p>
+                    </div>
+                </div>
+
+                <!-- Пагинация -->
+                <div id="paginationContainer" class="pagination" style="display: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        let totalPages = 1;
+        let perPage = 100;
+        let allProducts = [];
+        let selectedProductIds = new Set();
+        let isUpdating = false;
+        let eventSource = null;
+
+        // Загрузка товаров
+        async function loadProducts(page = 1) {
+            currentPage = page;
+            const container = document.getElementById('productsContainer');
+            container.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p>Загрузка товаров...</p></div>';
+
+            const currencyRate = document.getElementById('currencyRate').value;
+            const markupRubles = document.getElementById('markupRubles').value;
+            const dateCreatedAfter = document.getElementById('dateCreatedAfter').value;
+
+            const params = new URLSearchParams({
+                page: page,
+                per_page: perPage
+            });
+
+            if (dateCreatedAfter) params.append('date_created_after', dateCreatedAfter);
+
+            try {
+                const response = await fetch(`/api/wordpress/products?${params}`);
+                const data = await response.json();
+
+                if (data.success) {
+                    allProducts = data.products;
+                    totalPages = data.pagination.total_pages;
+                    renderProducts();
+                    renderPagination(data.pagination);
+                } else {
+                    container.innerHTML = `<div class="empty-state">
+                        <div class="empty-state-icon">❌</div>
+                        <h3>Ошибка загрузки</h3>
+                        <p>${data.error || 'Неизвестная ошибка'}</p>
+                    </div>`;
+                }
+            } catch (error) {
+                container.innerHTML = `<div class="empty-state">
+                    <div class="empty-state-icon">❌</div>
+                    <h3>Ошибка соединения</h3>
+                    <p>${error.message}</p>
+                </div>`;
+            }
+        }
+
+        // Отрисовка таблицы товаров
+        function renderProducts() {
+            const container = document.getElementById('productsContainer');
+            
+            if (allProducts.length === 0) {
+                container.innerHTML = `<div class="empty-state">
+                    <div class="empty-state-icon">📭</div>
+                    <h3>Товары не найдены</h3>
+                    <p>Попробуйте изменить фильтры</p>
+                </div>`;
+                return;
+            }
+
+            const table = `
+                <table class="products-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 50px">
+                                <input type="checkbox" id="selectAllTable" onchange="toggleSelectAll()">
+                            </th>
+                            <th style="width: 80px">Фото</th>
+                            <th>Название</th>
+                            <th style="width: 120px">SKU</th>
+                            <th style="width: 150px">Дата создания</th>
+                            <th style="width: 150px">Дата обновления</th>
+                            <th style="width: 120px">Статус</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${allProducts.map(product => `
+                            <tr id="product-row-${product.id}" data-product-id="${product.id}">
+                                <td>
+                                    <input type="checkbox" class="product-checkbox" 
+                                           value="${product.id}" 
+                                           onchange="updateSelectedCount()"
+                                           ${selectedProductIds.has(product.id) ? 'checked' : ''}>
+                                </td>
+                                <td>
+                                    <img src="${product.image || '/static/no-image.png'}" 
+                                         class="product-image" 
+                                         alt="${product.name}">
+                                </td>
+                                <td>
+                                    <div class="product-name" title="${product.name}">${product.name}</div>
+                                </td>
+                                <td>${product.sku || '—'}</td>
+                                <td>${formatDate(product.date_created)}</td>
+                                <td>${formatDate(product.date_modified)}</td>
+                                <td>
+                                    <span class="product-status status-idle" id="status-${product.id}">
+                                        Ожидание
+                                    </span>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+
+            container.innerHTML = table;
+            updateSelectedCount();
+        }
+
+        // Отрисовка пагинации
+        function renderPagination(pagination) {
+            const container = document.getElementById('paginationContainer');
+            
+            if (pagination.total_pages <= 1) {
+                container.style.display = 'none';
+                return;
+            }
+
+            container.style.display = 'flex';
+
+            let buttons = `
+                <button onclick="loadProducts(1)" ${currentPage === 1 ? 'disabled' : ''}>
+                    ⏮ Первая
+                </button>
+                <button onclick="loadProducts(${currentPage - 1})" ${currentPage === 1 ? 'disabled' : ''}>
+                    ◀ Назад
+                </button>
+            `;
+
+            // Показываем 5 страниц
+            const startPage = Math.max(1, currentPage - 2);
+            const endPage = Math.min(pagination.total_pages, currentPage + 2);
+
+            for (let i = startPage; i <= endPage; i++) {
+                buttons += `
+                    <button onclick="loadProducts(${i})" class="${i === currentPage ? 'active' : ''}">
+                        ${i}
+                    </button>
+                `;
+            }
+
+            buttons += `
+                <button onclick="loadProducts(${currentPage + 1})" ${currentPage === pagination.total_pages ? 'disabled' : ''}>
+                    Вперед ▶
+                </button>
+                <button onclick="loadProducts(${pagination.total_pages})" ${currentPage === pagination.total_pages ? 'disabled' : ''}>
+                    Последняя ⏭
+                </button>
+                <span class="pagination-info">
+                    Страница ${currentPage} из ${pagination.total_pages} (всего ${pagination.total_items} товаров)
+                </span>
+            `;
+
+            container.innerHTML = buttons;
+        }
+
+        // Выбор всех товаров на странице
+        function toggleSelectAll() {
+            const selectAllCheckbox = document.getElementById('selectAll') || document.getElementById('selectAllTable');
+            const checkboxes = document.querySelectorAll('.product-checkbox');
+            
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = selectAllCheckbox.checked;
+                const productId = parseInt(checkbox.value);
+                if (selectAllCheckbox.checked) {
+                    selectedProductIds.add(productId);
+                } else {
+                    selectedProductIds.delete(productId);
+                }
+            });
+
+            updateSelectedCount();
+        }
+
+        // Обновление счетчика выбранных
+        function updateSelectedCount() {
+            // Синхронизируем Set с чекбоксами
+            selectedProductIds.clear();
+            document.querySelectorAll('.product-checkbox:checked').forEach(checkbox => {
+                selectedProductIds.add(parseInt(checkbox.value));
+            });
+
+            const count = selectedProductIds.size;
+            document.getElementById('selectedCount').textContent = count;
+            document.getElementById('updateSelectedBtn').disabled = count === 0 || isUpdating;
+
+            // Синхронизируем "Выбрать все"
+            const allCheckboxes = document.querySelectorAll('.product-checkbox');
+            const checkedCheckboxes = document.querySelectorAll('.product-checkbox:checked');
+            const selectAllCheckbox = document.getElementById('selectAll');
+            if (selectAllCheckbox) {
+                selectAllCheckbox.checked = allCheckboxes.length > 0 && allCheckboxes.length === checkedCheckboxes.length;
+            }
+        }
+
+        // Обновление выбранных товаров
+        async function updateSelected() {
+            if (selectedProductIds.size === 0 || isUpdating) return;
+
+            isUpdating = true;
+            document.getElementById('updateSelectedBtn').disabled = true;
+
+            const currencyRate = parseFloat(document.getElementById('currencyRate').value);
+            const markupRubles = parseFloat(document.getElementById('markupRubles').value);
+
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            const progressLog = document.getElementById('progressLog');
+
+            progressContainer.classList.add('active');
+            progressLog.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/update-prices', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        product_ids: Array.from(selectedProductIds),
+                        settings: {
+                            currency_rate: currencyRate,
+                            markup_rubles: markupRubles
+                        }
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success && data.session_id) {
+                    // Подключаемся к SSE для получения прогресса
+                    connectToProgress(data.session_id);
+                } else {
+                    addLogEntry('Ошибка запуска обновления: ' + (data.error || 'Неизвестная ошибка'), 'error');
+                    isUpdating = false;
+                    document.getElementById('updateSelectedBtn').disabled = false;
+                }
+            } catch (error) {
+                addLogEntry('Ошибка соединения: ' + error.message, 'error');
+                isUpdating = false;
+                document.getElementById('updateSelectedBtn').disabled = false;
+            }
+        }
+
+        // Подключение к SSE для получения прогресса
+        function connectToProgress(sessionId) {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource(`/api/progress/${sessionId}`);
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleProgressEvent(data);
+            };
+
+            eventSource.onerror = function() {
+                eventSource.close();
+                addLogEntry('Соединение потеряно', 'error');
+                isUpdating = false;
+                document.getElementById('updateSelectedBtn').disabled = false;
+            };
+        }
+
+        // Обработка событий прогресса
+        function handleProgressEvent(data) {
+            const progressBar = document.getElementById('progressBar');
+
+            switch (data.type) {
+                case 'start':
+                    addLogEntry(`🚀 Начало обновления ${data.total} товаров`, 'info');
+                    break;
+
+                case 'product_start':
+                    const percent = Math.round((data.current / data.total) * 100);
+                    progressBar.style.width = percent + '%';
+                    progressBar.textContent = `${data.current}/${data.total} (${percent}%)`;
+                    
+                    // Меняем статус строки
+                    updateProductRowStatus(data.product_id, 'updating', 'Обновление...');
+                    addLogEntry(data.message, 'info');
+                    break;
+
+                case 'status_update':
+                    addLogEntry(data.message, 'info');
+                    break;
+
+                case 'product_done':
+                    const statusClass = data.status === 'completed' ? 'success' : 'error';
+                    addLogEntry(data.message, statusClass);
+                    
+                    // Обновляем статус строки
+                    if (data.status === 'completed') {
+                        updateProductRowStatus(data.product_id, 'completed', '✓ Обновлено');
+                        // Убираем товар из выбранных
+                        selectedProductIds.delete(data.product_id);
+                        // Снимаем галочку
+                        const checkbox = document.querySelector(`.product-checkbox[value="${data.product_id}"]`);
+                        if (checkbox) checkbox.checked = false;
+                    } else {
+                        updateProductRowStatus(data.product_id, 'error', '❌ Ошибка');
+                    }
+                    updateSelectedCount();
+                    break;
+
+                case 'complete':
+                    addLogEntry(`✓ Обновление завершено! Обновлено товаров: ${data.updated}`, 'success');
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100% - Завершено';
+                    isUpdating = false;
+                    eventSource.close();
+                    
+                    // Очистка статусов: снять все галочки и убрать желтую подсветку
+                    document.querySelectorAll('.product-checkbox').forEach(checkbox => {
+                        if (checkbox.checked) {
+                            checkbox.checked = false;
+                            const productId = checkbox.value;
+                            const row = document.getElementById(`product-row-${productId}`);
+                            if (row && row.className === 'updating') {
+                                row.className = '';
+                                const statusElement = document.getElementById(`status-${productId}`);
+                                if (statusElement) {
+                                    statusElement.className = 'product-status';
+                                    statusElement.textContent = 'Готов';
+                                }
+                            }
+                        }
+                    });
+                    selectedProductIds.clear();
+                    updateSelectedCount();
+                    
+                    // Перезагружаем текущую страницу для обновления сортировки
+                    // Обновленные товары уйдут в конец списка (сортировка от старых к новым)
+                    setTimeout(() => {
+                        addLogEntry('🔄 Обновление списка товаров...', 'info');
+                        loadProducts(currentPage);
+                    }, 1000);
+                    break;
+            }
+        }
+
+        // Обновление статуса строки товара
+        function updateProductRowStatus(productId, status, text) {
+            const row = document.getElementById(`product-row-${productId}`);
+            const statusElement = document.getElementById(`status-${productId}`);
+            
+            if (row) {
+                row.className = status;
+            }
+            
+            if (statusElement) {
+                statusElement.className = `product-status status-${status}`;
+                statusElement.textContent = text;
+            }
+        }
+
+        // Добавление записи в лог
+        function addLogEntry(message, type = 'info') {
+            const progressLog = document.getElementById('progressLog');
+            const entry = document.createElement('div');
+            entry.className = `progress-log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            progressLog.appendChild(entry);
+            progressLog.scrollTop = progressLog.scrollHeight;
+        }
+
+        // Форматирование даты
+        function formatDate(dateString) {
+            if (!dateString) return '—';
+            const date = new Date(dateString);
+            return date.toLocaleDateString('ru-RU') + ' ' + date.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+        }
+
+        // Поиск и обновление товара по ID WordPress
+        async function searchByProductId() {
+            const productIdInput = document.getElementById('productIdSearch');
+            const productId = productIdInput.value.trim();
+            
+            if (!productId) {
+                alert('❌ Введите ID товара WordPress');
+                productIdInput.focus();
+                return;
+            }
+            
+            // Проверка что это число
+            if (!/^\d+$/.test(productId)) {
+                alert('❌ ID товара должен быть числом (например: 18240957)');
+                productIdInput.focus();
+                return;
+            }
+            
+            const container = document.getElementById('productsContainer');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressLog = document.getElementById('progressLog');
+            
+            // Показываем индикатор загрузки
+            container.innerHTML = '<div class="loading"><div class="loading-spinner"></div><p>🔍 Поиск товара ID: ' + productId + '...</p></div>';
+            progressContainer.classList.add('active');
+            progressLog.innerHTML = '';
+            
+            try {
+                // 1. Загружаем данные товара из WordPress
+                const response = await fetch(`/api/wordpress/products?product_id=${productId}`);
+                const data = await response.json();
+                
+                if (!data.success || !data.products || data.products.length === 0) {
+                    container.innerHTML = `<div class="empty-state">
+                        <div class="empty-state-icon">❌</div>
+                        <h3>Товар не найден</h3>
+                        <p>Товар с ID ${productId} не найден в WordPress</p>
+                    </div>`;
+                    progressLog.innerHTML += `<div class="progress-log-entry error">❌ Товар ID ${productId} не найден</div>`;
+                    return;
+                }
+                
+                const product = data.products[0];
+                
+                progressLog.innerHTML += `<div class="progress-log-entry success">✓ Товар найден: ${product.name}</div>`;
+                
+                // Отображаем товар в таблице
+                allProducts = [product];
+                renderProducts();
+                
+                // Автоматически выбираем товар
+                selectedProductIds.clear();
+                selectedProductIds.add(product.id);
+                updateSelectedCount();
+                
+                // Отмечаем чекбокс
+                const checkbox = document.querySelector(`input[data-product-id="${product.id}"]`);
+                if (checkbox) checkbox.checked = true;
+                
+                progressLog.innerHTML += `<div class="progress-log-entry info">🔄 Запуск обновления цен и остатков...</div>`;
+                
+                // 2. Автоматически обновляем цены
+                setTimeout(() => {
+                    updateSelected();
+                }, 500);
+                
+            } catch (error) {
+                container.innerHTML = `<div class="empty-state">
+                    <div class="empty-state-icon">❌</div>
+                    <h3>Ошибка поиска</h3>
+                    <p>${error.message}</p>
+                </div>`;
+                progressLog.innerHTML += `<div class="progress-log-entry error">❌ Ошибка: ${error.message}</div>`;
+            }
+        }
+
+        // Сброс фильтров
+        function resetFilters() {
+            document.getElementById('currencyRate').value = '13.5';
+            document.getElementById('markupRubles').value = '5000';
+            document.getElementById('dateCreatedAfter').value = '';
+            document.getElementById('productIdSearch').value = '';
+            loadProducts();
+        }
+
+        // Автозагрузка при открытии страницы
+        window.addEventListener('load', () => {
+            loadProducts();
+        });
+    </script>
+</body>
+</html>

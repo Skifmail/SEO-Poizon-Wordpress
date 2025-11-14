@@ -37,6 +37,7 @@
         .header {
             text-align: center;
             margin-bottom: 40px;
+            position: relative;
         }
         
         .header h1 {
@@ -48,6 +49,37 @@
         .header p {
             color: #6B7280;
             font-size: 1.1rem;
+        }
+        
+        .header .logout-btn {
+            position: absolute;
+            top: 0;
+            right: 0;
+            background: #EF4444;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            padding: 10px 20px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.3s;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .header .logout-btn:hover {
+            background: #DC2626;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(239, 68, 68, 0.3);
+            text-decoration: none;
+        }
+        
+        .header .logout-btn:active {
+            transform: translateY(0);
         }
         
         .step-indicator {
@@ -224,6 +256,40 @@
             cursor: not-allowed;
         }
         
+        /* Стиль для кнопки "Загрузить еще" */
+        #nextPageBtn {
+            position: relative;
+            overflow: hidden;
+        }
+        
+        #nextPageBtn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 16px rgba(25, 135, 84, 0.6) !important;
+        }
+        
+        #nextPageBtn:active {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 8px rgba(25, 135, 84, 0.4) !important;
+        }
+        
+        /* Анимация пульсации для кнопки "Загрузить еще" */
+        .pulse-animation {
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 4px 12px rgba(25, 135, 84, 0.4);
+            }
+            50% {
+                box-shadow: 0 6px 20px rgba(25, 135, 84, 0.7);
+                transform: scale(1.02);
+            }
+            100% {
+                box-shadow: 0 4px 12px rgba(25, 135, 84, 0.4);
+            }
+        }
+        
         .loading-spinner {
             display: none;
             position: fixed;
@@ -383,8 +449,16 @@
         <div class="main-container">
             <!-- Header -->
             <div class="header">
+                <a href="/logout" class="logout-btn" title="Выйти из системы">
+                    <i class="fas fa-sign-out-alt"></i> Выход
+                </a>
                 <h1><i class="fas fa-shopping-bag"></i> Управление товарами WordPress</h1>
-                <p>Загрузка новых товаров и обновление цен/остатков</p>
+                <p>Загрузка новых товаров из Poizon API</p>
+                <div class="mt-3">
+                    <a href="/update" class="btn btn-lg btn-success">
+                        <i class="fas fa-sync-alt"></i> Обновление цен и остатков
+                    </a>
+                </div>
             </div>
             
             <!-- Панель ручного поиска -->
@@ -424,11 +498,6 @@
                 <li class="nav-item" role="presentation">
                     <button class="nav-link active" id="upload-tab" data-bs-toggle="tab" data-bs-target="#uploadTab" type="button">
                         <i class="fas fa-upload"></i> Загрузка товаров
-                    </button>
-                </li>
-                <li class="nav-item" role="presentation">
-                    <button class="nav-link" id="update-tab" data-bs-toggle="tab" data-bs-target="#updateTab" type="button">
-                        <i class="fas fa-sync-alt"></i> Обновление цен и остатков
                     </button>
                 </li>
             </ul>
@@ -577,7 +646,7 @@
                         <div id="pageNumbers" class="d-flex gap-2">
                             <!-- Page numbers will be inserted here -->
                         </div>
-                        <button class="btn btn-secondary" id="nextPageBtn">
+                        <button class="btn btn-success btn-lg fw-bold" id="nextPageBtn" style="box-shadow: 0 4px 12px rgba(25, 135, 84, 0.4); transition: all 0.3s ease;">
                             Следующая <i class="fas fa-chevron-right"></i>
                         </button>
                     </div>
@@ -628,184 +697,6 @@
             </div>
             <!-- End TAB 1 -->
             
-            <!-- TAB 2: Update Prices & Stock -->
-            <div class="tab-pane fade" id="updateTab" role="tabpanel">
-                
-                <h4 class="mb-4"><i class="fas fa-sync-alt"></i> Обновление цен и остатков из Poizon API</h4>
-                
-                <!-- Control Panel for Update -->
-                <div class="card mb-4 border-success" id="updateControlPanel" style="display: none;">
-                    <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-                        <div>
-                            <h5 class="mb-0">
-                                <i class="fas fa-check-circle"></i> Готово к обновлению
-                            </h5>
-                        </div>
-                        <div class="badge bg-light text-dark" style="font-size: 18px;">
-                            Выбрано: <strong id="updateSelectedCount">0</strong> товаров
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="d-flex gap-3 align-items-center flex-wrap">
-                            <button class="btn btn-success btn-lg" id="updatePricesBtn">
-                                <i class="fas fa-sync-alt"></i> Обновить цены и остатки
-                            </button>
-                            <button class="btn btn-outline-primary" id="selectAllUpdateBtnTop">
-                                <i class="fas fa-check-square"></i> Выбрать все
-                            </button>
-                            <button class="btn btn-outline-secondary" id="deselectAllUpdateBtnTop">
-                                <i class="fas fa-square"></i> Снять все
-                            </button>
-                            <span class="ms-auto text-muted">
-                                <i class="fas fa-info-circle"></i> Прокрутите вниз для выбора товаров
-                            </span>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Settings Panel for Update -->
-                <div class="settings-panel">
-                    <h5 class="mb-3"><i class="fas fa-cog"></i> Настройки цен</h5>
-                    <div class="row">
-                        <div class="col-md-6">
-                            <label class="form-label">Курс юаня к рублю</label>
-                            <input type="number" class="form-control" id="updateCurrencyRate" value="13.5" step="0.1" min="0">
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Наценка (в рублях)</label>
-                            <input type="number" class="form-control" id="updateMarkupRubles" value="5000" step="100" min="0">
-                        </div>
-                    </div>
-                    <div class="mt-3">
-                        <small class="text-muted">
-                            <i class="fas fa-info-circle"></i> 
-                            Пример: 100¥ × <span id="updateRateDisplay">13.5</span> + <span id="updateMarkupDisplay">5000</span>₽ = 
-                            <strong><span id="updatePriceExample">1850</span>₽</strong>
-                        </small>
-                    </div>
-                </div>
-                
-                <!-- Category Filter -->
-                <div class="form-section mb-4">
-                    <h5 class="mb-3"><i class="fas fa-filter"></i> Фильтр по категориям (необязательно)</h5>
-                    <div class="mb-3">
-                        <button class="btn btn-outline-primary btn-sm" id="loadCategoriesBtn">
-                            <i class="fas fa-list"></i> Показать категории
-                        </button>
-                        <button class="btn btn-outline-secondary btn-sm ms-2" id="selectAllCategoriesBtn" style="display:none;">
-                            <i class="fas fa-check-square"></i> Выбрать все
-                        </button>
-                        <button class="btn btn-outline-secondary btn-sm" id="deselectAllCategoriesBtn" style="display:none;">
-                            <i class="fas fa-square"></i> Снять все
-                        </button>
-                        <span class="ms-3" id="selectedCategoriesCount" style="display:none;">
-                            <strong>Выбрано категорий: <span id="categoriesCountNumber">0</span></strong>
-                        </span>
-                    </div>
-                    <div id="categoriesTree" style="max-height: 300px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; background: white; display: none;">
-                        <!-- Categories will be loaded here -->
-                    </div>
-                </div>
-                
-                <!-- Date Filters -->
-                <div class="card mb-4">
-                    <div class="card-header">
-                        <h6 class="mb-0"><i class="fas fa-calendar"></i> Фильтры по дате</h6>
-                    </div>
-                    <div class="card-body">
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <label class="form-label">Обновлять только товары старше:</label>
-                                <select class="form-select" id="updateDaysFilter">
-                                    <option value="">Все товары</option>
-                                    <option value="1">1 дня</option>
-                                    <option value="3">3 дней</option>
-                                    <option value="7" selected>7 дней</option>
-                                    <option value="14">14 дней</option>
-                                    <option value="30">30 дней</option>
-                                    <option value="60">60 дней</option>
-                                    <option value="90">90 дней</option>
-                                </select>
-                                <small class="text-muted">Товары, не обновлявшиеся указанное количество дней</small>
-                            </div>
-                            <div class="col-md-6">
-                                <label class="form-label">Загружены за период:</label>
-                                <select class="form-select" id="createdDaysFilter">
-                                    <option value="" selected>Все товары</option>
-                                    <option value="1">Последние 24 часа</option>
-                                    <option value="7">Последние 7 дней</option>
-                                    <option value="14">Последние 14 дней</option>
-                                    <option value="30">Последний месяц</option>
-                                    <option value="90">Последние 3 месяца</option>
-                                </select>
-                                <small class="text-muted">Товары, загруженные в указанный период</small>
-                            </div>
-                        </div>
-                        <div class="mt-3">
-                            <button class="btn btn-outline-primary btn-sm" id="applyDateFilters">
-                                <i class="fas fa-filter"></i> Применить фильтры
-                            </button>
-                            <button class="btn btn-outline-secondary btn-sm" id="resetDateFilters">
-                                <i class="fas fa-times"></i> Сбросить
-                            </button>
-                            <span class="ms-3 text-muted" id="dateFilterInfo"></span>
-                        </div>
-                    </div>
-                </div>
-                
-                <!-- Load Products Button -->
-                <div class="mb-4">
-                    <button class="btn btn-primary" id="loadWPProductsBtn">
-                        <i class="fas fa-download"></i> Загрузить товары из WordPress
-                        <span id="categoryFilterBadge" class="badge bg-secondary ms-2" style="display:none;"></span>
-                    </button>
-                    <button class="btn btn-outline-primary ms-2" id="selectAllUpdateBtn" style="display:none;">
-                        <i class="fas fa-check-square"></i> Выбрать все
-                    </button>
-                    <button class="btn btn-outline-secondary ms-2" id="deselectAllUpdateBtn" style="display:none;">
-                        <i class="fas fa-square"></i> Снять все
-                    </button>
-                    <span class="ms-3" id="updateSelectedInfo" style="display:none;">
-                        Выбрано: <span class="product-count" id="updateSelectedCount">0</span>
-                    </span>
-                </div>
-                
-                <!-- WordPress Products Container -->
-                <div id="wpProductsContainer" class="row">
-                    <!-- Products will be loaded here -->
-                </div>
-                
-                <!-- Loading Spinner for Update -->
-                <div class="loading-spinner" id="updateLoadingSpinner">
-                    <div class="spinner-border text-light" role="status">
-                        <span class="visually-hidden">Загрузка...</span>
-                    </div>
-                    <p class="mt-3" id="updateLoadingText">Загрузка товаров из WordPress...</p>
-                </div>
-                
-                <!-- Update Button (moved to top) -->
-                
-                <!-- Progress Section for Update -->
-                <div id="updateProgressSection" style="display: none; margin-top: 30px;">
-                    <h5>Обновление товаров...</h5>
-                    <div class="progress" style="height: 30px;">
-                        <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                             id="updateProgressBar" 
-                             role="progressbar" 
-                             style="width: 0%;">0%</div>
-                    </div>
-                    <p class="mt-2 text-center" id="updateProgressText">Подготовка...</p>
-                </div>
-                
-                <!-- Results Section for Update -->
-                <div id="updateResultsContainer" style="display:none; margin-top:30px;">
-                    <h5><i class="fas fa-check-circle text-success"></i> Результаты обновления</h5>
-                    <div id="updateResultsContent"></div>
-                </div>
-                
-            </div>
-            <!-- End TAB 2 -->
-            
             </div>
             <!-- End tab-content -->
             
@@ -850,6 +741,33 @@
                 }
             });
         });
+        
+        // Event Listeners
+        function initEventListeners() {
+            document.getElementById('brandSelect').addEventListener('change', onBrandChange);
+            document.getElementById('categorySelect').addEventListener('change', onCategoryChange);
+            document.getElementById('uploadBtn').addEventListener('click', uploadProducts);
+            document.getElementById('uploadBtnTop').addEventListener('click', uploadProducts);
+            document.getElementById('selectAllBtn').addEventListener('click', selectAllProducts);
+            document.getElementById('selectAllBtnTop').addEventListener('click', selectAllProducts);
+            document.getElementById('deselectAllBtn').addEventListener('click', deselectAllProducts);
+            document.getElementById('deselectAllBtnTop').addEventListener('click', deselectAllProducts);
+            document.getElementById('currencyRate').addEventListener('input', updatePriceExample);
+            document.getElementById('markupRubles').addEventListener('input', updatePriceExample);
+            document.getElementById('prevPageBtn').addEventListener('click', prevPage);
+            document.getElementById('nextPageBtn').addEventListener('click', nextPage);
+        }
+        
+        // Update price example
+        function updatePriceExample() {
+            const rate = parseFloat(document.getElementById('currencyRate').value) || 13.5;
+            const markup = parseFloat(document.getElementById('markupRubles').value) || 5000;
+            const example = Math.round(100 * rate + markup);
+            
+            document.getElementById('rateDisplay').textContent = rate;
+            document.getElementById('markupDisplay').textContent = markup;
+            document.getElementById('priceExample').textContent = example;
+        }
         
         // Event Listeners
         function initEventListeners() {
@@ -1039,16 +957,31 @@
                 const data = await response.json();
                 
                 if (data.success) {
-                    allProducts = data.products;
+                    // Если это первая страница (page=0), заменяем товары
+                    // Если это следующие страницы, добавляем к существующим
+                    if (page === 0) {
+                        allProducts = data.products;
+                    } else {
+                        // Добавляем новые товары, избегая дубликатов
+                        const existingIds = new Set(allProducts.map(p => p.spuId));
+                        const newProducts = data.products.filter(p => !existingIds.has(p.spuId));
+                        allProducts = [...allProducts, ...newProducts];
+                    }
+                    
                     currentPage = page;
                     hasMoreProducts = data.has_more;
                     
-                    renderProducts(allProducts); // renderProducts вызовет updatePaginationUI внутри
+                    // Если это первая загрузка, сбрасываем страницу. Если догрузка - сохраняем
+                    renderProducts(allProducts, page > 0); // renderProducts вызовет updatePaginationUI внутри
                     
                     document.getElementById('productsSection').style.display = 'block';
                     document.getElementById('uploadSection').style.display = 'block';
                     
-                    showNotification(`Найдено ${data.total} товаров`, 'success');
+                    if (page === 0) {
+                        showNotification(`Найдено ${data.total} товаров`, 'success');
+                    } else {
+                        showNotification(`Загружено еще ${data.total} товаров (всего: ${allProducts.length})`, 'success');
+                    }
                 } else {
                     showNotification('Ошибка: ' + data.error, 'danger');
                 }
@@ -1067,9 +1000,11 @@
         }
         
         // Render products with pagination
-        function renderProducts(products) {
+        function renderProducts(products, keepCurrentPage = false) {
             allProducts = products; // Сохраняем все товары
-            currentDisplayPage = 1; // Сбрасываем на первую страницу
+            if (!keepCurrentPage) {
+                currentDisplayPage = 1; // Сбрасываем на первую страницу только при первой загрузке
+            }
             renderCurrentPage();
         }
         
@@ -1177,11 +1112,22 @@
             // Обновляем счетчики
             document.getElementById('currentPage').textContent = currentDisplayPage;
             document.getElementById('pageProductCount').textContent = 
-                `${(currentDisplayPage - 1) * itemsPerPage + 1}-${Math.min(currentDisplayPage * itemsPerPage, allProducts.length)} из ${allProducts.length}`;
+                `${(currentDisplayPage - 1) * itemsPerPage + 1}-${Math.min(currentDisplayPage * itemsPerPage, allProducts.length)} из ${allProducts.length}${hasMoreProducts ? '+' : ''}`;
             
             // Обновляем кнопки
             document.getElementById('prevPageBtn').disabled = currentDisplayPage === 1;
-            document.getElementById('nextPageBtn').disabled = currentDisplayPage === totalPages;
+            // Кнопка "Далее" доступна если есть локальные страницы ИЛИ можно догрузить с сервера
+            document.getElementById('nextPageBtn').disabled = currentDisplayPage === totalPages && !hasMoreProducts;
+            
+            // Меняем текст кнопки если можно догрузить
+            const nextBtn = document.getElementById('nextPageBtn');
+            if (currentDisplayPage === totalPages && hasMoreProducts) {
+                nextBtn.innerHTML = '<i class="bi bi-cloud-download-fill"></i> Загрузить еще товары';
+                nextBtn.classList.add('pulse-animation');
+            } else {
+                nextBtn.innerHTML = 'Следующая <i class="fas fa-chevron-right"></i>';
+                nextBtn.classList.remove('pulse-animation');
+            }
             
             // Генерируем номера страниц
             const pageNumbers = document.getElementById('pageNumbers');
@@ -1214,10 +1160,32 @@
         }
         
         // Navigate to next page
-        function nextPage() {
+        async function nextPage() {
             const totalPages = Math.ceil(allProducts.length / itemsPerPage);
-            if (currentDisplayPage < totalPages) {
+            
+            // Если достигли конца локальных данных И есть еще товары на сервере
+            if (currentDisplayPage >= totalPages && hasMoreProducts) {
+                // Загружаем следующий батч товаров
+                try {
+                    showLoading('Загрузка следующих товаров...');
+                    // ИСПРАВЛЕНО: передаем все 3 параметра (categoryId, brand, page)
+                    await loadProducts(selectedCategoryId, currentBrand, currentPage + 1);
+                    hideLoading();
+                    
+                    // После загрузки переходим на следующую страницу
+                    if (allProducts.length > currentDisplayPage * itemsPerPage) {
+                        goToPage(currentDisplayPage + 1);
+                    }
+                } catch (error) {
+                    hideLoading();
+                    showError('Ошибка загрузки товаров: ' + error.message);
+                }
+            } else if (currentDisplayPage < totalPages) {
+                // Просто переходим на следующую локальную страницу
                 goToPage(currentDisplayPage + 1);
+            } else {
+                // Больше товаров нет
+                showError('Это все доступные товары');
             }
         }
         
@@ -1262,22 +1230,19 @@
             });
         }
         
-        // Step 4: Upload products with real-time progress via SSE
+        // Step 4: Upload products with real-time progress via Celery task polling
         async function uploadProducts() {
             if (selectedProducts.size === 0) {
                 showNotification('Выберите хотя бы один товар', 'warning');
                 return;
             }
-            
+
             const settings = {
                 currency_rate: parseFloat(document.getElementById('currencyRate').value) || 13.5,
                 markup_rubles: parseFloat(document.getElementById('markupRubles').value) || 5000
             };
-            
-            // Показываем overlay-индикатор загрузки
-            showLoading(true, `Загрузка ${selectedProducts.size} товаров в WordPress...\n\nЭто может занять несколько минут`);
-            
-            // Show progress section
+
+            // Show and prepare the progress UI
             document.getElementById('progressSection').style.display = 'block';
             document.getElementById('progressLog').innerHTML = '';
             document.getElementById('progressBar').style.width = '0%';
@@ -1285,117 +1250,142 @@
             document.getElementById('progressText').textContent = 'Инициализация...';
             document.getElementById('uploadBtn').disabled = true;
             document.getElementById('uploadBtnTop').disabled = true;
-            
-            // Автопрокрутка к блоку прогресса
+            document.getElementById('resultsContainer').style.display = 'none';
+
+
+            // Scroll to progress section
             setTimeout(() => {
-                const progressSection = document.getElementById('progressSection');
-                if (progressSection) {
-                    progressSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                }
+                document.getElementById('progressSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
             }, 300);
-            
+
             try {
-                // Step 1: Start upload and get session_id
+                // Step 1: Dispatch tasks and get their IDs
                 const response = await fetch('/api/upload', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         product_ids: Array.from(selectedProducts),
                         settings: settings
-                        // Бренд НЕ передаем - он берется из Poizon API для каждого товара
                     })
                 });
-                
+
                 const data = await response.json();
-                
+
                 if (!data.success) {
-                    showNotification('Ошибка: ' + data.error, 'danger');
-                    document.getElementById('progressSection').style.display = 'none';
-                    document.getElementById('uploadBtn').disabled = false;
-                    document.getElementById('uploadBtnTop').disabled = false;
-                    showLoading(false);
-                    return;
+                    throw new Error(data.error || 'Не удалось запустить задачи.');
                 }
+
+                const taskIds = data.task_ids;
+                if (!taskIds || taskIds.length === 0) {
+                    throw new Error('Сервер не вернул ID задач для отслеживания.');
+                }
+
+                addProgressLog(`🚀 Создано ${taskIds.length} задач. Начинаем отслеживание...`, 'info');
                 
-                const sessionId = data.session_id;
-                const totalProducts = data.total;
-                let currentProduct = 0;
-                let results = [];
-                
-                // Step 2: Connect to SSE for real-time progress
-                const eventSource = new EventSource(`/api/progress/${sessionId}`);
-                
-                eventSource.onmessage = function(event) {
-                    const message = JSON.parse(event.data);
-                    
-                    switch(message.type) {
-                        case 'start':
-                            addProgressLog(`🚀 Начинаем обработку ${message.total} товаров...`, 'info');
-                            // Скрываем overlay после начала обработки
-                            showLoading(false);
-                            break;
-                            
-                        case 'product_start':
-                            currentProduct = message.current;
-                            addProgressLog(`📦 [${message.current}/${message.total}] Обработка товара ${message.spu_id}...`, 'info');
-                            updateProgress(currentProduct, totalProducts, message.message);
-                            break;
-                            
-                        case 'status_update':
-                            addProgressLog(`   ➜ ${message.message}`, 'detail');
-                            break;
-                            
-                        case 'product_done':
-                            const icon = message.status === 'completed' ? '✅' : '❌';
-                            const color = message.status === 'completed' ? 'success' : 'danger';
-                            addProgressLog(`${icon} [${message.current}/${message.total}] ${message.message}`, color);
-                            updateProgress(message.current, totalProducts, message.message);
-                            break;
-                            
-                        case 'complete':
-                            results = message.results;
-                            addProgressLog(`✨ Обработка завершена! Успешно: ${message.completed}, Ошибок: ${message.errors}`, 'success');
-                            showResults({results: results, total: message.total, completed: message.completed, errors: message.errors});
-                            showNotification(`Загружено: ${message.completed} из ${message.total}`, 'success');
-                            
-                            // Очищаем выбранные товары
-                            selectedProducts.clear();
-                            updateSelectedCount();
-                            loadProductsPage(currentPage);
-                            break;
-                            
-                        case 'error':
-                            addProgressLog(`❌ Ошибка: ${message.message}`, 'danger');
-                            showNotification('Ошибка: ' + message.message, 'danger');
-                            break;
-                            
-                        case 'done':
-                            eventSource.close();
-                            document.getElementById('uploadBtn').disabled = false;
-                            document.getElementById('uploadBtnTop').disabled = false;
-                            break;
-                    }
-                };
-                
-                eventSource.onerror = function(error) {
-                    console.error('SSE Error:', error);
-                    eventSource.close();
-                    addProgressLog('❌ Ошибка соединения с сервером', 'danger');
-                    document.getElementById('uploadBtn').disabled = false;
-                    document.getElementById('uploadBtnTop').disabled = false;
-                    showLoading(false);
-                };
-                
+                // Step 2: Monitor tasks using polling
+                monitorTasks(taskIds);
+
             } catch (error) {
-                showNotification('Ошибка загрузки: ' + error.message, 'danger');
-                document.getElementById('progressSection').style.display = 'none';
+                showNotification('Ошибка запуска загрузки: ' + error.message, 'danger');
+                addProgressLog(`❌ Критическая ошибка: ${error.message}`, 'danger');
                 document.getElementById('uploadBtn').disabled = false;
                 document.getElementById('uploadBtnTop').disabled = false;
-                showLoading(false);
             }
         }
+
+        function monitorTasks(taskIds) {
+            const totalTasks = taskIds.length;
+            let completedTasks = 0;
+            let results = [];
+
+            const taskStatus = {}; // Store individual task progress
+
+            const interval = setInterval(async () => {
+                let overallProgress = 0;
+
+                for (const taskId of taskIds) {
+                    // If task is already done, skip it
+                    if (taskStatus[taskId] && taskStatus[taskId].done) {
+                        overallProgress += taskStatus[taskId].progress;
+                        continue;
+                    }
+
+                    try {
+                        const response = await fetch(`/api/task_status/${taskId}`);
+                        const data = await response.json();
+
+                        if (data.success) {
+                            const task = data.task;
+                            const state = task.state;
+                            
+                            // Initialize task status if not present
+                            if (!taskStatus[taskId]) {
+                                taskStatus[taskId] = { progress: 0, done: false, last_message: '' };
+                            }
+
+                            // Update UI only if message has changed
+                            const currentMessage = task.status || '';
+                            if (currentMessage && taskStatus[taskId].last_message !== currentMessage) {
+                                addProgressLog(`[${task.product_id || '...'}]: ${currentMessage}`, 'detail');
+                                taskStatus[taskId].last_message = currentMessage;
+                            }
+                            
+                            taskStatus[taskId].progress = task.progress || 0;
+
+                            if (state === 'SUCCESS' || state === 'FAILURE') {
+                                taskStatus[taskId].done = true;
+                                completedTasks++;
+                                
+                                const resultData = task.result || { product_id: task.product_id, message: task.status, status: state === 'SUCCESS' ? 'completed' : 'error' };
+                                results.push(resultData);
+
+                                const icon = state === 'SUCCESS' ? '✅' : '❌';
+                                const color = state === 'SUCCESS' ? 'success' : 'danger';
+                                addProgressLog(`${icon} [${completedTasks}/${totalTasks}] Задача для товара ${resultData.product_id} завершена. Статус: ${resultData.message}`, color);
+                            }
+                        } else {
+                            // Handle case where status check fails
+                            taskStatus[taskId] = { progress: 100, done: true, last_message: 'Ошибка проверки статуса' };
+                            completedTasks++;
+                            results.push({ product_id: 'Unknown', message: `Ошибка проверки статуса для ${taskId}`, status: 'error' });
+                            addProgressLog(`❌ [${completedTasks}/${totalTasks}] Не удалось получить статус задачи ${taskId}`, 'danger');
+                        }
+
+                    } catch (error) {
+                        taskStatus[taskId] = { progress: 100, done: true, last_message: 'Ошибка сети' };
+                        completedTasks++;
+                        results.push({ product_id: 'Unknown', message: `Сетевая ошибка при проверке ${taskId}`, status: 'error' });
+                        addProgressLog(`❌ [${completedTasks}/${totalTasks}] Сетевая ошибка при проверке статуса задачи ${taskId}`, 'danger');
+                    }
+                }
+
+                // Calculate and update overall progress
+                const totalProgress = Object.values(taskStatus).reduce((acc, task) => acc + task.progress, 0);
+                const overallPercent = Math.round(totalProgress / totalTasks);
+                updateProgress(overallPercent, 100, `Общий прогресс: ${overallPercent}% (${completedTasks} из ${totalTasks} задач завершено)`);
+
+                // If all tasks are done, stop polling
+                if (completedTasks === totalTasks) {
+                    clearInterval(interval);
+                    addProgressLog(`✨ Все задачи обработаны!`, 'success');
+                    
+                    const successCount = results.filter(r => r.status === 'completed').length;
+                    const errorCount = totalTasks - successCount;
+                    
+                    showResults({ results: results, total: totalTasks, completed: successCount, errors: errorCount });
+                    showNotification(`Загружено: ${successCount} из ${totalTasks}`, 'success');
+
+                    // Cleanup and re-enable UI
+                    selectedProducts.clear();
+                    updateSelectedCount();
+                    loadProductsPage(currentPage); // Refresh product list
+                    document.getElementById('uploadBtn').disabled = false;
+                    document.getElementById('uploadBtnTop').disabled = false;
+                }
+
+            }, 2000); // Poll every 2 seconds
+        }
+
         
         // Add log entry to progress log
         function addProgressLog(message, type = 'info') {

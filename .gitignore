@@ -1,87 +1,44 @@
-# ============================================================================
-# .gitignore для проекта Poizon → WordPress
-# ============================================================================
-
-# --- СЕКРЕТНЫЕ ДАННЫЕ (КРИТИЧНО!) ---
-.env                            # API ключи и секреты
-*.env                           # Все файлы окружения
-.env.*
-.env.local
-config.json                     # Конфигурация с секретами
-
-# --- Python ---
-__pycache__/                    # Скомпилированные Python файлы
+# Python
+__pycache__/
 *.py[cod]
 *$py.class
-*.so                            # C расширения
+*.so
 .Python
-build/
-dist/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# --- Виртуальное окружение ---
-venv/                           # Виртуальное окружение проекта
-ENV/
+venv/
 env/
-.venv
+ENV/
+*.egg-info/
+dist/
+build/
 
-# --- IDE и редакторы ---
-.vscode/                        # Visual Studio Code
-.idea/                          # PyCharm / IntelliJ IDEA
-.cursor/                        # Cursor IDE
-.gigaide/                       # GigaIDE
-*.iml
+# Environment
+.env
+.env.local
+*.env
+
+# Logs
+*.log
+kash/*.log
+kash/web_app.log
+kash/fix_*.log
+
+# IDE
+.idea/
+.vscode/
 *.swp
 *.swo
 *~
 
-# --- Логи ---
-*.log                           # Все log файлы
-*.log.*
-web_app.log
-poizon_sync_service.log
-logs/
+# OS
+.DS_Store
+Thumbs.db
 
-# --- Тестирование ---
-.pytest_cache/                  # Pytest кэш
-.coverage
-htmlcov/
-.tox/
-.nox/
-*.cover
-
-# --- Временные файлы ---
-*.tmp
-*.temp
-*.bak
+# Project specific
+kash/brands_cache.json
 *.cache
+deploy.tar.gz
 
-# --- OS файлы ---
-.DS_Store                       # macOS
-Thumbs.db                       # Windows
-desktop.ini
-ehthumbs.db
-$RECYCLE.BIN/
-
-# --- База данных ---
-*.db
-*.sqlite
-*.sqlite3
-
-# --- Медиа файлы (загруженные) ---
-uploads/
-media/
-images/
-
-# --- Резервные копии ---
+# Temporary files
+*.tmp
+*.bak
 *.backup
-backup/
-old/
-
-# --- Прочее ---
-.mypy_cache/
-.dmypy.json
-dmypy.json
-.pyre/

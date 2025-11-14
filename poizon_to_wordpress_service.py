@@ -19,10 +19,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 from dataclasses import dataclass
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 import time
 
 # Импортируем рабочий клиент Poizon API
 from poizon_api_fixed import PoisonAPIClientFixed
+
+# Импортируем обработчик изображений
+from image_processor import resize_image_to_square
 
 # Настройка логирования
 logging.basicConfig(
@@ -147,17 +152,33 @@ class WooCommerceService:
         self.consumer_key = os.getenv('WC_CONSUMER_KEY')
         self.consumer_secret = os.getenv('WC_CONSUMER_SECRET')
         
+        # Для загрузки изображений через WordPress REST API
+        self.wp_user = os.getenv('WORDPRESS_USER')
+        self.wp_password = os.getenv('WORDPRESS_APP_PASSWORD')
+        
         if not all([self.url, self.consumer_key, self.consumer_secret]):
             raise ValueError("WC_URL, WC_CONSUMER_KEY, WC_CONSUMER_SECRET должны быть в .env")
         
         self.auth = (self.consumer_key, self.consumer_secret)
+        
+        # Авторизация для загрузки изображений (WordPress REST API)
+        if self.wp_user and self.wp_password:
+            self.wp_auth = (self.wp_user, self.wp_password)
+            # Убрано: логи инициализации (дублируются в режиме DEBUG)
+        else:
+            self.wp_auth = None
+            logger.warning("[WARNING] WORDPRESS_USER и WORDPRESS_APP_PASSWORD не указаны - загрузка изображений может не работать")
+        
         self.category_cache = {}  # Кеш категорий {name: id}
         self.category_tree = {}  # Дерево категорий {id: {name, parent, slug}}
+        self.attribute_cache = {}  # Кеш атрибутов {name: {id, slug}}
+        self.term_cache = {}  # Кеш терминов атрибутов {(attr_id, term_name): {id, name, slug}}
         
-        # Загружаем существующие категории при инициализации
+        # Загружаем существующие категории и атрибуты при инициализации
         self._load_categories()
+        self._load_attributes()
         
-        logger.info(f"[OK] Инициализирован WooCommerce клиент: {self.url}")
+        # Убрано: логи инициализации (дублируются в режиме DEBUG)
     
     def _load_categories(self):
         """Загружает все категории из WordPress"""
@@ -185,8 +206,7 @@ class WooCommerceService:
                     # Также кешируем по имени последней категории
                     self.category_cache[cat['name']] = cat_id
                 
-                logger.info(f"[OK] Загружено категорий из WordPress: {len(categories)}")
-                logger.info(f"  Примеры: {list(self.category_cache.keys())[:5]}")
+                # Убрано: логи инициализации (дублируются в режиме DEBUG)
             else:
                 logger.warning(f"Не удалось загрузить категории: {response.status_code}")
                 
@@ -208,6 +228,186 @@ class WooCommerceService:
             current_id = cat['parent']
         
         return ' > '.join(path_parts)
+    
+    def _load_attributes(self):
+        """Загружает все глобальные атрибуты товаров из WordPress"""
+        try:
+            url = f"{self.url}/wp-json/wc/v3/products/attributes"
+            
+            response = requests.get(url, auth=self.auth, verify=False, timeout=30)
+            
+            if response.status_code == 200:
+                attributes = response.json()
+                
+                for attr in attributes:
+                    attr_id = attr['id']
+                    attr_name = attr['name']
+                    attr_slug = attr['slug']
+                    
+                    self.attribute_cache[attr_name] = {
+                        'id': attr_id,
+                        'slug': attr_slug
+                    }
+                
+                # Убрано: логи инициализации (дублируются в режиме DEBUG)
+            else:
+                logger.warning(f"Не удалось загрузить атрибуты: {response.status_code}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка загрузки атрибутов: {e}")
+    
+    def ensure_attribute_exists(self, attribute_name: str) -> Optional[Dict]:
+        """
+        Проверяет существование глобального атрибута товара и создает его если нужно.
+        
+        Args:
+            attribute_name: Название атрибута (например "Бренд", "Цвет", "Размер")
+            
+        Returns:
+            Словарь с id и slug атрибута или None при ошибке
+        """
+        # Проверяем кеш
+        if attribute_name in self.attribute_cache:
+            # Убрано DEBUG: атрибут уже существует
+            return self.attribute_cache[attribute_name]
+        
+        # Создаем новый атрибут
+        try:
+            url = f"{self.url}/wp-json/wc/v3/products/attributes"
+            
+            # Генерируем slug из имени
+            import re
+            import unicodedata
+            
+            # Транслитерация для русских названий
+            translit_map = {
+                'Ц': 'ts', 'ц': 'ts', 'Ч': 'ch', 'ч': 'ch', 'Ш': 'sh', 'ш': 'sh',
+                'Щ': 'sch', 'щ': 'sch', 'Ю': 'yu', 'ю': 'yu', 'Я': 'ya', 'я': 'ya',
+                'А': 'a', 'а': 'a', 'Б': 'b', 'б': 'b', 'В': 'v', 'в': 'v',
+                'Г': 'g', 'г': 'g', 'Д': 'd', 'д': 'd', 'Е': 'e', 'е': 'e',
+                'Ё': 'yo', 'ё': 'yo', 'Ж': 'zh', 'ж': 'zh', 'З': 'z', 'з': 'z',
+                'И': 'i', 'и': 'i', 'Й': 'y', 'й': 'y', 'К': 'k', 'к': 'k',
+                'Л': 'l', 'л': 'l', 'М': 'm', 'м': 'm', 'Н': 'n', 'н': 'n',
+                'О': 'o', 'о': 'o', 'П': 'p', 'п': 'p', 'Р': 'r', 'р': 'r',
+                'С': 's', 'с': 's', 'Т': 't', 'т': 't', 'У': 'u', 'у': 'u',
+                'Ф': 'f', 'ф': 'f', 'Х': 'h', 'х': 'h', 'Ы': 'y', 'ы': 'y',
+                'Э': 'e', 'э': 'e', 'Ъ': '', 'ъ': '', 'Ь': '', 'ь': ''
+            }
+            
+            slug = attribute_name
+            for cyr, lat in translit_map.items():
+                slug = slug.replace(cyr, lat)
+            
+            # Убираем все кроме букв, цифр и дефисов
+            slug = re.sub(r'[^a-z0-9-]', '-', slug.lower())
+            slug = re.sub(r'-+', '-', slug).strip('-')
+            
+            data = {
+                'name': attribute_name,
+                'slug': slug,
+                'type': 'select',
+                'order_by': 'menu_order',
+                'has_archives': False
+            }
+            
+            response = requests.post(url, auth=self.auth, json=data, verify=False, timeout=30)
+            
+            if response.status_code == 201:
+                result = response.json()
+                attr_info = {
+                    'id': result['id'],
+                    'slug': result['slug']
+                }
+                self.attribute_cache[attribute_name] = attr_info
+                logger.info(f"[OK] Создан глобальный атрибут '{attribute_name}': ID={result['id']}, slug='{result['slug']}'")
+                return attr_info
+            else:
+                logger.error(f"Ошибка создания атрибута '{attribute_name}': {response.status_code}")
+                logger.error(f"Ответ: {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка создания атрибута '{attribute_name}': {e}")
+            return None
+    
+    def create_attribute_term(self, attribute_id: int, term_name: str) -> Optional[Dict]:
+        """
+        Создает термин (значение) для глобального атрибута с кешированием.
+        
+        Args:
+            attribute_id: ID атрибута
+            term_name: Название термина (например "Nike", "Красный", "42")
+            
+        Returns:
+            Словарь с id, name и slug термина или None
+        """
+        # Проверяем кеш
+        cache_key = (attribute_id, term_name)
+        if cache_key in self.term_cache:
+            # Убрано DEBUG: термин найден в кеше
+            return self.term_cache[cache_key]
+        
+        try:
+            url = f"{self.url}/wp-json/wc/v3/products/attributes/{attribute_id}/terms"
+            
+            # Проверяем существует ли такой термин
+            check_response = requests.get(url, auth=self.auth, params={'search': term_name}, verify=False, timeout=30)
+            if check_response.status_code == 200:
+                existing = check_response.json()
+                for term in existing:
+                    if term['name'] == term_name:
+                        result = {
+                            'id': term['id'],
+                            'name': term['name'],
+                            'slug': term['slug']
+                        }
+                        # Сохраняем в кеш
+                        self.term_cache[cache_key] = result
+                        # Убрано DEBUG: термин уже существует
+                        return result
+            
+            # Создаем новый термин
+            data = {
+                'name': term_name
+            }
+            
+            response = requests.post(url, auth=self.auth, json=data, verify=False, timeout=30)
+            
+            if response.status_code == 201:
+                result_data = response.json()
+                result = {
+                    'id': result_data['id'],
+                    'name': result_data['name'],
+                    'slug': result_data['slug']
+                }
+                # Сохраняем в кеш
+                self.term_cache[cache_key] = result
+                logger.info(f"  [OK] Создан термин '{term_name}' для атрибута ID={attribute_id}, slug='{result_data['slug']}'")
+                return result
+            elif response.status_code == 400:
+                # Возможно термин уже существует, ищем его
+                check_response = requests.get(url, auth=self.auth, verify=False, timeout=30)
+                if check_response.status_code == 200:
+                    all_terms = check_response.json()
+                    for term in all_terms:
+                        if term['name'] == term_name:
+                            result = {
+                                'id': term['id'],
+                                'name': term['name'],
+                                'slug': term['slug']
+                            }
+                            # Сохраняем в кеш
+                            self.term_cache[cache_key] = result
+                            # Убрано DEBUG: термин найден при повторной проверке
+                            return result
+                return None
+            else:
+                logger.error(f"Ошибка создания термина '{term_name}': {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Ошибка создания термина '{term_name}': {e}")
+            return None
     
     def get_category_id(self, category_path: str) -> int:
         """
@@ -271,7 +471,7 @@ class WooCommerceService:
                         break
                     
                     all_products.extend(products)
-                    logger.info(f"  Загружена страница {page}: {len(products)} товаров")
+                    # Убрано DEBUG: загружена страница
                     
                     # Проверяем есть ли еще страницы
                     total_pages = int(response.headers.get('X-WP-TotalPages', 1))
@@ -308,7 +508,7 @@ class WooCommerceService:
             
             if response.status_code == 200:
                 variations = response.json()
-                logger.info(f"  Найдено вариаций для товара {product_id}: {len(variations)}")
+                # Убрано DEBUG: найдено вариаций
                 return variations
             else:
                 logger.error(f"Ошибка загрузки вариаций: {response.status_code}")
@@ -369,17 +569,56 @@ class WooCommerceService:
             # Получаем ID существующей категории
             category_id = self.get_category_id(category_path)
             if category_id == 0:
-                logger.warning(f"Категория не найдена в WordPress, товар попадет в Uncategorized")
-                logger.warning(f"Проверьте что в WordPress есть категория: '{category_path}'")
-                categories_data = []  # Пустой список = Uncategorized
+                # Попытка перезагрузить категории, если кэш пустой (могло быть из-за таймаута)
+                if not self.category_cache:
+                    logger.warning("⚠️ Кэш категорий пустой, пробуем перезагрузить...")
+                    self._load_categories()
+                    # Повторная попытка найти категорию
+                    category_id = self.get_category_id(category_path)
+                
+                if category_id == 0:
+                    logger.warning(f"Категория не найдена в WordPress, товар попадет в Uncategorized")
+                    logger.warning(f"Проверьте что в WordPress есть категория: '{category_path}'")
+                    categories_data = []  # Пустой список = Uncategorized
+                else:
+                    categories_data = [{'id': category_id}]  # Используем ID категории!
             else:
                 categories_data = [{'id': category_id}]  # Используем ID категории!
             
-            # Формируем теги из ключевых слов (если есть)
+            # Формируем теги только из бренда и модели (без лишнего мусора)
             tags = []
             keywords = getattr(product, 'keywords', '')
+            
+            # Добавляем только бренд
+            if product.brand:
+                tags.append({'name': product.brand.strip()})
+            
+            # Извлекаем название модели из первых 2-3 ключевых слов (пропускаем бренд и описательные слова)
             if keywords:
-                tags = [{'name': kw.strip()} for kw in keywords.split(';')[:10] if kw.strip()]
+                # Разбиваем ключевые слова
+                kw_list = [kw.strip() for kw in keywords.split(';') if kw.strip()]
+                
+                # Ищем модель: пропускаем бренд и берём только короткие названия (не описательные)
+                for kw in kw_list[:5]:  # Проверяем первые 5 ключевых слов
+                    # Пропускаем бренд (уже добавлен)
+                    if product.brand and kw.lower() == product.brand.lower():
+                        continue
+                    
+                    # Пропускаем длинные описательные фразы (кроссовки, обувь, беговые и т.д.)
+                    if len(kw.split()) > 3:  # Более 3 слов = описание
+                        continue
+                    
+                    # Пропускаем очевидные описательные термины
+                    descriptive_terms = ['кроссовки', 'обувь', 'ботинки', 'сандалии', 'сланцы', 
+                                       'женская', 'мужская', 'детская', 'унисекс',
+                                       'белый', 'черный', 'красный', 'синий', 'зеленый', 'желтый',
+                                       'спортивная', 'повседневная', 'беговая', 'баскетбольная']
+                    if any(term in kw.lower() for term in descriptive_terms):
+                        continue
+                    
+                    # Если дошли сюда - это скорее всего название модели
+                    tags.append({'name': kw})
+                    break  # Берём только первую подходящую модель
             
             # Используем SEO title если есть, иначе обычный title
             product_name = getattr(product, 'seo_title', product.title) or product.title
@@ -456,6 +695,30 @@ class WooCommerceService:
             if keywords:
                 meta_data.append({'key': '_yoast_wpseo_focuskw', 'value': keywords})
             
+            # Загружаем изображения с изменением размера до 600x600
+            logger.info(f"  Загрузка изображений для товара...")
+            processed_images = []
+            article_number = getattr(product, 'article_number', '')
+            
+            for idx, img_url in enumerate(product.images[:5], 1):  # Первые 5 изображений
+                # Формируем имя файла
+                filename = f"{product.brand}_{product.title.replace(' ', '_')}_{article_number}_{idx}.jpg"
+                filename = filename.replace('/', '_').replace('\\', '_')  # Убираем слэши
+                
+                # Загружаем изображение с ресайзом (возвращает ID медиафайла)
+                media_id = self.upload_resized_image(img_url, filename, size=600)
+                
+                if media_id:
+                    # Используем ID медиафайла вместо URL (избегаем проблем с SSL)
+                    processed_images.append({'id': media_id})
+                else:
+                    # Если не удалось загрузить - используем оригинальный URL
+                    logger.warning(f"  Не удалось загрузить изображение {idx}, используем оригинальный URL")
+                    processed_images.append({
+                        'src': img_url,
+                        'alt': f"{product.brand} {product.title} {article_number}"
+                    })
+            
             data = {
                 'name': product_name,
                 'type': 'variable',
@@ -464,62 +727,200 @@ class WooCommerceService:
                 'short_description': getattr(product, 'short_description', ''),
                 'categories': categories_data,  # Используем ID категорий!
                 'tags': tags,
-                'images': [{'src': img} for img in product.images[:5]],  # Первые 5 изображений
+                'images': processed_images,  # Загруженные изображения 600x600
                 'meta_data': meta_data,
                 'attributes': [],
                 'status': 'publish'
             }
             
             # Формируем атрибуты
+            # ВАЖНО: Используем ГЛОБАЛЬНЫЕ атрибуты WordPress, а не локальные!
+            # Это критически важно для корректной работы вариаций в WooCommerce
+            
             # 1. Бренд (не для вариаций)
-            data['attributes'].append({
-                'name': 'Brand',
-                'visible': True,
-                'variation': False,
-                'options': [product.brand]
-            })
+            brand_attr = self.ensure_attribute_exists('Бренд')
+            if brand_attr:
+                # Создаем термин для бренда и получаем его slug
+                brand_term = self.create_attribute_term(brand_attr['id'], product.brand)
+                
+                if brand_term:
+                    # Для глобальных атрибутов используем название термина (не slug!)
+                    data['attributes'].append({
+                        'id': brand_attr['id'],  # ИСПОЛЬЗУЕМ ГЛОБАЛЬНЫЙ АТРИБУТ!
+                        'visible': True,
+                        'variation': False,
+                        'options': [brand_term['name']]  # NAME, не slug!
+                    })
+                    
+                    # ВАЖНО: Привязываем товар к taxonomy бренда через поле brands
+                    # Это автоматически выберет бренд галочкой в админке WordPress
+                    data['brands'] = [{
+                        'id': brand_term['id'],
+                        'name': brand_term['name'],
+                        'slug': brand_term['slug']
+                    }]
+                    
+                    logger.info(f"  Бренд привязан: '{brand_term['name']}' (ID: {brand_term['id']})")
+                else:
+                    logger.warning(f"  Не удалось создать термин для бренда '{product.brand}', используем название")
+                    data['attributes'].append({
+                        'id': brand_attr['id'],
+                        'visible': True,
+                        'variation': False,
+                        'options': [product.brand]
+                    })
+            else:
+                logger.warning("  Не удалось создать атрибут Бренд, используем локальный")
+                data['attributes'].append({
+                    'name': 'Бренд',
+                    'visible': True,
+                    'variation': False,
+                    'options': [product.brand]
+                })
             
             # 2. Цвет (ДЛЯ ВАРИАЦИЙ, СНАЧАЛА!)
+            # УМНАЯ ЛОГИКА: Используем атрибут Цвет только если цветов больше 1
             unique_colors = list(set([v['color'] for v in product.variations if 'color' in v]))
             
-            logger.info(f"  [DEBUG] Собрано цветов из вариаций: {len(unique_colors)}")
-            logger.info(f"  [DEBUG] Уникальные цвета: {unique_colors}")
-            logger.info(f"  [DEBUG] Первая вариация: size={product.variations[0].get('size')}, color={product.variations[0].get('color', 'НЕТ')}")
-            logger.info(f"  [DEBUG] Вторая вариация: size={product.variations[1].get('size') if len(product.variations) > 1 else 'N/A'}, color={product.variations[1].get('color', 'НЕТ') if len(product.variations) > 1 else 'N/A'}")
+            # Убрано DEBUG: цвета из вариаций
             
-            if unique_colors:
+            # Проверяем: если цвет один - НЕ создаем атрибут Цвет (только Размер)
+            use_color_attribute = len(unique_colors) > 1
+            
+            if unique_colors and use_color_attribute:
+                logger.info(f"  ✓ Используем атрибут Цвет ({len(unique_colors)} цветов)")
                 # Сортируем цвета для удобства
                 unique_colors.sort()
-                data['attributes'].append({
-                    'name': 'Цвет',
-                    'visible': True,
-                    'variation': True,
-                    'options': unique_colors
-                })
-                logger.info(f"  Цвета в атрибутах для WordPress: {unique_colors}")
+                
+                # Создаем глобальный атрибут "Цвет"
+                color_attr = self.ensure_attribute_exists('Цвет')
+                if color_attr:
+                    # ПАРАЛЛЕЛЬНОЕ создание терминов для ускорения!
+                    start_time = time.time()
+                    color_names = []
+                    
+                    # Используем ThreadPoolExecutor для параллельных запросов
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        # Создаем задачи для всех цветов
+                        future_to_color = {
+                            executor.submit(self.create_attribute_term, color_attr['id'], color): color 
+                            for color in unique_colors
+                        }
+                        
+                        # Собираем результаты
+                        for future in as_completed(future_to_color):
+                            color = future_to_color[future]
+                            try:
+                                color_term = future.result()
+                                if color_term:
+                                    color_names.append(color_term['name'])
+                                else:
+                                    color_names.append(color)  # Fallback
+                            except Exception as e:
+                                logger.error(f"  Ошибка создания термина '{color}': {e}")
+                                color_names.append(color)  # Fallback
+                    
+                    elapsed = time.time() - start_time
+                    logger.info(f"  Цвета созданы параллельно за {elapsed:.1f}с: {color_names}")
+                    
+                    data['attributes'].append({
+                        'id': color_attr['id'],  # ИСПОЛЬЗУЕМ ГЛОБАЛЬНЫЙ АТРИБУТ!
+                        'visible': True,
+                        'variation': True,
+                        'options': color_names  # NAMES, не slug'и!
+                    })
+                else:
+                    logger.warning("  Не удалось создать глобальный атрибут Цвет, используем локальный")
+                    data['attributes'].append({
+                        'name': 'Цвет',
+                        'visible': True,
+                        'variation': True,
+                        'options': unique_colors
+                    })
+            elif unique_colors and not use_color_attribute:
+                logger.info(f"  ⊗ Пропускаем атрибут Цвет (только 1 цвет: '{unique_colors[0]}')")
+            else:
+                logger.info(f"  ⊗ Нет цветов у вариаций")
             
             # 3. Размер (ДЛЯ ВАРИАЦИЙ, ВТОРЫМ!)
             unique_sizes = list(set([str(v['size']) for v in product.variations]))
-            # Сортируем размеры в правильном порядке
-            size_order = ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
-            sorted_sizes = []
-            for s in size_order:
-                if s in unique_sizes:
-                    sorted_sizes.append(s)
-            # Добавляем числовые размеры (обувь)
-            numeric_sizes = sorted([s for s in unique_sizes if s not in size_order], key=lambda x: float(x) if x.replace('.', '').isdigit() else 999)
-            sorted_sizes.extend(numeric_sizes)
             
-            data['attributes'].append({
-                'name': 'Размер',
-                'visible': True,
-                'variation': True,
-                'options': sorted_sizes if sorted_sizes else unique_sizes
-            })
+            # ПРОВЕРЯЕМ: Есть ли размеры вообще?
+            if unique_sizes:
+                # Сортируем размеры в правильном порядке
+                size_order = ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
+                sorted_sizes = []
+                for s in size_order:
+                    if s in unique_sizes:
+                        sorted_sizes.append(s)
+                # Добавляем числовые размеры (обувь)
+                numeric_sizes = sorted([s for s in unique_sizes if s not in size_order], key=lambda x: float(x) if x.replace('.', '').isdigit() else 999)
+                sorted_sizes.extend(numeric_sizes)
+                
+                final_sizes = sorted_sizes if sorted_sizes else unique_sizes
+            else:
+                final_sizes = []
+                logger.info("  ⊗ Нет размеров у вариаций (товар без вариаций)")
             
-            # Добавляем ВСЕ дополнительные атрибуты (КРОМЕ Цвета!)
+            # Создаем глобальный атрибут "Размер" ТОЛЬКО если есть размеры
+            if final_sizes:
+                size_attr = self.ensure_attribute_exists('Размер')
+            else:
+                size_attr = None
+                
+            if size_attr and final_sizes:
+                # ПАРАЛЛЕЛЬНОЕ создание терминов для ускорения!
+                start_time = time.time()
+                size_names = []
+                
+                # Используем ThreadPoolExecutor для параллельных запросов
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    # Создаем задачи для всех размеров
+                    future_to_size = {
+                        executor.submit(self.create_attribute_term, size_attr['id'], size): size 
+                        for size in final_sizes
+                    }
+                    
+                    # Собираем результаты в правильном порядке
+                    size_results = {}
+                    for future in as_completed(future_to_size):
+                        size = future_to_size[future]
+                        try:
+                            size_term = future.result()
+                            if size_term:
+                                size_results[size] = size_term['name']
+                            else:
+                                size_results[size] = size  # Fallback
+                        except Exception as e:
+                            logger.error(f"  Ошибка создания термина '{size}': {e}")
+                            size_results[size] = size  # Fallback
+                    
+                    # Восстанавливаем правильный порядок
+                    size_names = [size_results[size] for size in final_sizes]
+                
+                elapsed = time.time() - start_time
+                logger.info(f"  Размеры созданы параллельно за {elapsed:.1f}с: {size_names}")
+                
+                data['attributes'].append({
+                    'id': size_attr['id'],  # ИСПОЛЬЗУЕМ ГЛОБАЛЬНЫЙ АТРИБУТ!
+                    'visible': True,
+                    'variation': True,
+                    'options': size_names  # NAMES, не slug'и!
+                })
+            elif final_sizes:
+                # Fallback: если не удалось создать глобальный атрибут, используем локальный
+                logger.warning("  Не удалось создать глобальный атрибут Размер, используем локальный")
+                data['attributes'].append({
+                    'name': 'Размер',
+                    'visible': True,
+                    'variation': True,
+                    'options': final_sizes
+                })
+            # Если final_sizes пустой - просто не добавляем атрибут Размер
+            
+            # Добавляем ВСЕ дополнительные атрибуты (КРОМЕ Цвета, Размера и Бренда!)
             for attr_name, attr_value in product.attributes.items():
-                if attr_name not in ['Brand', 'Бренд', 'Размер', 'Size', 'Цвет', 'Color']:
+                if attr_name not in ['Бренд', 'Размер', 'Size', 'Цвет', 'Color']:
                     data['attributes'].append({
                         'name': attr_name,
                         'visible': True,
@@ -527,17 +928,7 @@ class WooCommerceService:
                         'options': [str(attr_value)]
                     })
             
-            # Логируем данные для отладки
-            logger.info(f"  [DEBUG] ======== АТРИБУТЫ ДЛЯ ОТПРАВКИ В WORDPRESS ========")
-            for attr in data['attributes']:
-                logger.info(f"  [DEBUG] Атрибут '{attr['name']}': variation={attr.get('variation', False)}, options={attr['options']}")
-            logger.info(f"  [DEBUG] =================================================")
-            
-            logger.debug(f"Создание товара в WordPress:")
-            logger.debug(f"  Название: {data['name'][:50]}")
-            logger.debug(f"  SKU: {data['sku']}")
-            logger.debug(f"  Категория: {data['categories']}")
-            logger.debug(f"  Вариаций: {len(product.variations)}")
+            # Убрано DEBUG: атрибуты для отправки в WordPress
             
             # Пробуем создать товар с retry logic (SSL может глючить)
             max_retries = 3
@@ -574,7 +965,9 @@ class WooCommerceService:
             # Создаем вариации
             if settings is None:
                 settings = SyncSettings()
-            self._create_variations(product_id, product, settings)
+            
+            # Передаем информацию о том, используется ли атрибут Цвет
+            self._create_variations(product_id, product, settings, use_color_attribute)
             
             return product_id
             
@@ -582,30 +975,64 @@ class WooCommerceService:
             logger.error(f"[ERROR] Ошибка создания товара {product.sku}: {e}")
             return None
     
-    def _create_variations(self, product_id: int, product: PoisonProduct, settings: SyncSettings):
-        """Создает вариации для товара"""
-        url = f"{self.url}/wp-json/wc/v3/products/{product_id}/variations"
+    def _create_variations(self, product_id: int, product: PoisonProduct, settings: SyncSettings, use_color_attribute: bool = True):
+        """
+        Создает вариации для товара ПАРАЛЛЕЛЬНО для ускорения.
         
-        for idx, variation in enumerate(product.variations, 1):
+        Args:
+            product_id: ID родительского товара в WordPress
+            product: Объект товара из Poizon
+            settings: Настройки синхронизации (курс, наценка)
+            use_color_attribute: Использовать ли атрибут Цвет (False если цвет один)
+        """
+        url_base = f"{self.url}/wp-json/wc/v3/products/{product_id}/variations"
+        
+        # Получаем slug'и для атрибутов вариаций
+        color_slug = None
+        size_slug = None
+        
+        if 'Цвет' in self.attribute_cache:
+            color_slug = self.attribute_cache['Цвет']['slug']
+        if 'Размер' in self.attribute_cache:
+            size_slug = self.attribute_cache['Размер']['slug']
+        
+        logger.info(f"  Создание {len(product.variations)} вариаций параллельно...")
+        start_time = time.time()
+        
+        def create_single_variation(idx_var_tuple):
+            """Вспомогательная функция для создания одной вариации"""
+            idx, variation = idx_var_tuple
             try:
                 # Применяем курс и наценку к цене
                 final_price = settings.apply_price_transformation(variation['price'])
                 
-                # Формируем атрибуты вариации (ВАЖНО: в том же порядке что и в основном товаре!)
+                # Формируем атрибуты вариации
                 var_attributes = []
                 
-                # Сначала цвет (если есть)
-                if 'color' in variation and variation['color']:
-                    var_attributes.append({
-                        'name': 'Цвет',
-                        'option': str(variation['color'])
-                    })
+                # Цвет (ТОЛЬКО если используется атрибут Цвет - т.е. цветов > 1)
+                if use_color_attribute and 'color' in variation and variation['color']:
+                    if color_slug:
+                        var_attributes.append({
+                            'id': self.attribute_cache['Цвет']['id'],
+                            'option': str(variation['color'])
+                        })
+                    else:
+                        var_attributes.append({
+                            'name': 'Цвет',
+                            'option': str(variation['color'])
+                        })
                 
-                # Потом размер
-                var_attributes.append({
-                    'name': 'Размер',
-                    'option': str(variation['size'])
-                })
+                # Размер (всегда добавляем)
+                if size_slug:
+                    var_attributes.append({
+                        'id': self.attribute_cache['Размер']['id'],
+                        'option': str(variation['size'])
+                    })
+                else:
+                    var_attributes.append({
+                        'name': 'Размер',
+                        'option': str(variation['size'])
+                    })
                 
                 var_data = {
                     'sku': variation['sku_id'],
@@ -615,39 +1042,89 @@ class WooCommerceService:
                     'attributes': var_attributes
                 }
                 
-                # Добавляем изображение для вариации (если есть)
+                # Добавляем изображение для вариации (если есть) - загружаем с ресайзом 600x600
                 if 'images' in variation and variation['images']:
-                    var_data['image'] = {
-                        'src': variation['images'][0]  # Первое изображение для этого цвета
-                    }
-                    logger.info(f"  [DEBUG] Добавлено изображение для вариации: {variation['images'][0][:50]}...")
+                    size_str = variation.get('size', '')
+                    color_str = variation.get('color', '')
+                    
+                    # Формируем имя файла для вариации
+                    var_filename = f"{product.brand}_{product.title.replace(' ', '_')}_{color_str}_{size_str}.jpg"
+                    var_filename = var_filename.replace('/', '_').replace('\\', '_')
+                    
+                    # Загружаем изображение вариации с ресайзом (возвращает ID медиафайла)
+                    var_image_id = self.upload_resized_image(
+                        variation['images'][0], 
+                        var_filename, 
+                        size=600
+                    )
+                    
+                    if var_image_id:
+                        # Используем ID медиафайла вместо URL
+                        var_data['image'] = {'id': var_image_id}
+                    else:
+                        # Fallback - используем оригинальный URL
+                        var_data['image'] = {
+                            'src': variation['images'][0],
+                            'alt': f"{product.brand} {product.title} {color_str} {size_str} размер"
+                        }
                 
-                color_info = f", цвет={variation.get('color', 'нет')}" if 'color' in variation else ""
-                logger.info(f"  Создание вариации {idx}/{len(product.variations)}: размер={variation['size']}{color_info}, SKU={variation['sku_id']}, цена={final_price}₽, остаток={variation['stock']}")
-                
-                # Retry logic для вариаций
+                # Отправляем запрос с retry
                 max_retries = 3
                 for attempt in range(max_retries):
                     try:
-                        response = requests.post(url, auth=self.auth, json=var_data, verify=False, timeout=60)
+                        response = requests.post(url_base, auth=self.auth, json=var_data, verify=False, timeout=60)
                         response.raise_for_status()
                         created_var = response.json()
                         created_sku = created_var.get('sku', 'NO_SKU')
                         color_log = f", цвет={variation.get('color', 'нет')}" if 'color' in variation else ""
-                        logger.info(f"  [OK] Создана вариация размер {variation['size']}{color_log}, отправлен SKU={variation['sku_id']}, сохранен SKU={created_sku}, цена {final_price}₽")
-                        break
-                    except Exception as retry_error:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"  Повтор создания вариации (попытка {attempt+2})")
-                            time.sleep(1)
-                        else:
-                            raise retry_error
-                
-                # Пауза убрана для ускорения (большинство хостингов нормально обрабатывают запросы)
-                # time.sleep(0.3)
+                        return {
+                            'success': True,
+                            'idx': idx,
+                            'size': variation['size'],
+                            'color': variation.get('color'),
+                            'sku': created_sku,
+                            'price': final_price
+                        }
+                    except requests.exceptions.HTTPError as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        time.sleep(1)
+                        continue
                 
             except Exception as e:
-                logger.error(f"  [ERROR] Ошибка создания вариации: {e}")
+                logger.error(f"  ❌ Ошибка создания вариации {idx}: {e}")
+                return {
+                    'success': False,
+                    'idx': idx,
+                    'error': str(e)
+                }
+        
+        # ПАРАЛЛЕЛЬНОЕ создание всех вариаций
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            # Enumerate variations for indexing
+            indexed_variations = list(enumerate(product.variations, 1))
+            
+            # Submit all tasks
+            futures = [executor.submit(create_single_variation, iv) for iv in indexed_variations]
+            
+            # Collect results
+            results = []
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                    
+                    if result['success']:
+                        color_info = f", цвет={result['color']}" if result.get('color') else ""
+                        logger.info(f"  ✓ Вариация {result['idx']}/{len(product.variations)}: "
+                                  f"размер={result['size']}{color_info}, SKU={result['sku']}, "
+                                  f"цена={result['price']}₽")
+                except Exception as e:
+                    logger.error(f"  ❌ Исключение при получении результата: {e}")
+        
+        elapsed = time.time() - start_time
+        success_count = sum(1 for r in results if r['success'])
+        logger.info(f"  Создано вариаций: {success_count}/{len(product.variations)} за {elapsed:.1f}с")
     
     def update_product_variations(self, product_id: int, product: PoisonProduct, settings: SyncSettings = None) -> int:
         """
@@ -678,11 +1155,11 @@ class WooCommerceService:
             # Логируем SKU для отладки
             if product.variations:
                 poizon_skus = [v['sku_id'] for v in product.variations[:3]]
-                logger.info(f"  Примеры SKU из Poizon: {poizon_skus}")
+                # Убрано DEBUG: примеры SKU из Poizon
             
             if existing_variations:
                 wc_skus = [v.get('sku') for v in existing_variations[:3]]
-                logger.info(f"  Примеры SKU из WooCommerce: {wc_skus}")
+                # Убрано DEBUG: примеры SKU из WooCommerce
             
             # Обновляем по SKU
             for variation in product.variations:
@@ -697,7 +1174,7 @@ class WooCommerceService:
                     if wc_var.get('sku') == sku_id:
                         var_id = wc_var['id']
                         
-                        logger.info(f"  Обновляем SKU {sku_id}: цена {final_price}₽, остаток {variation['stock']}, размер={variation.get('size', 'N/A')}")
+                        # Убрано DEBUG: обновляем SKU
                         
                         # Обновляем цену и остаток
                         update_url = f"{self.url}/wp-json/wc/v3/products/{product_id}/variations/{var_id}"
@@ -729,6 +1206,158 @@ class WooCommerceService:
         except Exception as e:
             logger.error(f"[ERROR] Ошибка обновления вариаций товара {product_id}: {e}")
             return 0
+    
+    def update_product_prices_only(self, product_id: int, spu_id: int, currency_rate: float, markup_rubles: float, poizon_client) -> int:
+        """
+        Обновляет ТОЛЬКО цены и остатки товара без полной загрузки данных.
+        
+        Быстрый метод для массового обновления цен:
+        - Получает только priceInfo из Poizon API (легкий запрос)
+        - Загружает только вариации из WordPress
+        - Обновляет только цену и остаток каждой вариации
+        
+        Args:
+            product_id: ID товара в WordPress
+            spu_id: ID товара в Poizon
+            currency_rate: Курс юаня к рублю
+            markup_rubles: Наценка в рублях
+            poizon_client: Клиент Poizon API для получения цен
+            
+        Returns:
+            Количество обновленных вариаций
+        """
+        try:
+            # 1. Получаем только цены из Poizon (быстро!)
+            prices = poizon_client.get_price_info(spu_id)
+            
+            if not prices:
+                logger.warning(f"  Нет цен для товара {spu_id}")
+                return 0
+            
+            # 2. Получаем только вариации из WooCommerce (без фото и прочего)
+            variations_url = f"{self.url}/wp-json/wc/v3/products/{product_id}/variations"
+            params = {'per_page': 100}
+            
+            response = requests.get(
+                variations_url,
+                auth=self.auth,
+                params=params,
+                verify=False,
+                timeout=30
+            )
+            response.raise_for_status()
+            wc_variations = response.json()
+            
+            # 3. Обновляем цены параллельно
+            updated_count = 0
+            
+            for wc_var in wc_variations:
+                sku_id = wc_var.get('sku')
+                
+                if not sku_id or sku_id not in prices:
+                    continue
+                
+                price_data = prices[sku_id]
+                poizon_price_yuan = price_data['price']
+                stock = price_data['stock']
+                
+                # Рассчитываем финальную цену
+                price_rub = poizon_price_yuan * currency_rate
+                final_price = int(price_rub + markup_rubles)
+                
+                # Обновляем вариацию
+                var_id = wc_var['id']
+                update_url = f"{self.url}/wp-json/wc/v3/products/{product_id}/variations/{var_id}"
+                update_data = {
+                    'regular_price': str(final_price),
+                    'stock_quantity': stock
+                }
+                
+                update_response = requests.put(
+                    update_url,
+                    auth=self.auth,
+                    json=update_data,
+                    verify=False,
+                    timeout=30
+                )
+                update_response.raise_for_status()
+                
+                updated_count += 1
+                logger.info(f"  ✓ SKU {sku_id}: {final_price}₽ (остаток: {stock})")
+            
+            logger.info(f"[OK] Обновлено {updated_count} вариаций для товара {product_id}")
+            return updated_count
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Ошибка обновления цен товара {product_id}: {e}")
+            return 0
+    
+    def upload_resized_image(self, image_url: str, filename: str, size: int = 600) -> Optional[str]:
+        """
+        Загружает изображение с изменением размера до 600x600 с сохранением пропорций.
+        
+        Args:
+            image_url: URL исходного изображения
+            filename: Имя файла для сохранения
+            size: Размер квадрата (по умолчанию 600x600)
+            
+        Returns:
+            URL загруженного изображения в WordPress Media Library или None при ошибке
+        """
+        try:
+            # 1. Скачиваем и обрабатываем изображение
+            # Убрано DEBUG: обработка изображения
+            image_bytes = resize_image_to_square(image_url, size=size)
+            
+            # 2. Загружаем в WordPress Media Library
+            upload_url = f"{self.url}/wp-json/wp/v2/media"
+            
+            # Транслитерация имени файла для HTTP заголовка (только ASCII символы)
+            import re
+            import unicodedata
+            
+            # Убираем кириллицу и спецсимволы, оставляем только ASCII
+            safe_filename = unicodedata.normalize('NFKD', filename)
+            safe_filename = safe_filename.encode('ascii', 'ignore').decode('ascii')
+            safe_filename = re.sub(r'[^\w\s.-]', '', safe_filename)
+            safe_filename = re.sub(r'[-\s]+', '_', safe_filename)
+            
+            # Если после очистки имя пустое - генерируем из timestamp
+            if not safe_filename or len(safe_filename) < 3:
+                import time
+                safe_filename = f"product_image_{int(time.time())}.jpg"
+            
+            headers = {
+                'Content-Disposition': f'attachment; filename={safe_filename}',
+                'Content-Type': 'image/jpeg'
+            }
+            
+            # Используем WordPress авторизацию для загрузки изображений
+            auth_to_use = self.wp_auth if self.wp_auth else self.auth
+            
+            response = requests.post(
+                upload_url,
+                auth=auth_to_use,
+                headers=headers,
+                data=image_bytes,
+                verify=False,
+                timeout=60  # Увеличиваем таймаут для загрузки
+            )
+            
+            if response.status_code == 201:
+                media_data = response.json()
+                media_id = media_data.get('id')
+                media_url = media_data.get('source_url')
+                logger.info(f"  ✓ Изображение загружено: {media_url} (ID: {media_id})")
+                # Возвращаем ID медиафайла для привязки к товару
+                return media_id
+            else:
+                logger.error(f"  ✗ Ошибка загрузки изображения: {response.status_code} - {response.text}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"  ✗ Ошибка обработки изображения {image_url}: {e}")
+            return None
 
 
 class PoisonToWordPressService:
