@@ -13,7 +13,7 @@ import re
 # Import services and settings
 from poizon_to_wordpress_service import WooCommerceService, SyncSettings
 from poizon_api_fixed import PoisonAPIClientFixed as PoisonAPIService
-from web_app import GigaChatService, init_services, poizon_client, woocommerce_client, gigachat_client
+from services import GigaChatService, init_services, poizon_client, woocommerce_client, gigachat_client
 
 # Import the Celery app instance
 from celery_app import celery
